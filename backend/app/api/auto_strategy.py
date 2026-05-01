@@ -235,8 +235,8 @@ SYSTEM_PROMPT = """You are an expert quantitative trading strategy designer.
 Analyze market data and return ONLY a valid JSON object with this exact structure (no markdown, no explanation):
 
 {
-  "symbol": "BTC/KRW",
-  "timeframe": "1h",
+  "symbol": "{{SYMBOL}}",
+  "timeframe": "{{TIMEFRAME}}",
   "exchange": "upbit",
   "entry_conditions": [
     {"id": "e1", "indicator": "RSI", "params": {"length": 14}, "operator": "<", "value": 35},
@@ -263,6 +263,16 @@ Rules:
 - Be conservative with risk"""
 
 
+# 지원 심볼 목록 (scanner.py SCAN_SYMBOLS와 동일하게 유지)
+SUPPORTED_SYMBOLS = [
+    "BTC/KRW", "ETH/KRW", "XRP/KRW", "SOL/KRW", "DOGE/KRW",
+    "ADA/KRW", "AVAX/KRW", "LINK/KRW", "DOT/KRW", "ATOM/KRW",
+    "MATIC/KRW", "LTC/KRW", "BCH/KRW", "ETC/KRW", "TRX/KRW",
+    "NEAR/KRW", "APT/KRW", "OP/KRW", "SUI/KRW", "SEI/KRW",
+    "SAND/KRW", "MANA/KRW", "ALGO/KRW", "HBAR/KRW", "VET/KRW",
+]
+
+
 # ─── API 엔드포인트 ─────────────────────────────────────────────────────────
 
 class AutoStrategyRequest(BaseModel):
@@ -285,17 +295,33 @@ async def get_provider():
     }
 
 
+@router.get("/symbols")
+async def get_symbols(user: User = Depends(get_current_user)):
+    """AI 전략 생성 지원 심볼 목록"""
+    return {"symbols": SUPPORTED_SYMBOLS}
+
+
 @router.post("/generate")
 async def generate_strategy(
     req: AutoStrategyRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # 심볼 정규화 및 검증
+    symbol = req.symbol.upper().strip()
+    if "/" not in symbol:
+        symbol = f"{symbol}/KRW"
+    if symbol not in SUPPORTED_SYMBOLS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"지원하지 않는 심볼입니다: {symbol}. 지원 목록: {', '.join(SUPPORTED_SYMBOLS[:5])} 등"
+        )
+
     # 시장 데이터 수집
     connector = ExchangeConnector(exchange_id=req.exchange, is_paper=True)
     try:
         df = await asyncio.wait_for(
-            connector.fetch_ohlcv(req.symbol, req.timeframe, limit=200),
+            connector.fetch_ohlcv(symbol, req.timeframe, limit=200),
             timeout=20,
         )
         await connector.close()
@@ -306,15 +332,22 @@ async def generate_strategy(
         await connector.close()
         raise HTTPException(status_code=502, detail=f"시장 데이터 조회 실패: {e}")
 
-    market_summary = _build_market_summary(df, req.symbol, req.timeframe)
+    if df is None or len(df) < 50:
+        raise HTTPException(status_code=502, detail=f"{symbol} 데이터가 부족합니다. 다른 타임프레임을 시도해보세요.")
+
+    market_summary = _build_market_summary(df, symbol, req.timeframe)
+
+    # 심볼을 프롬프트에 직접 주입
+    system_prompt = SYSTEM_PROMPT.replace("{{SYMBOL}}", symbol).replace("{{TIMEFRAME}}", req.timeframe)
     user_prompt = (
         f"Analyze the following market data and generate an optimal trading strategy.\n\n"
         f"{market_summary}\n\n"
-        f"Generate a complete strategy JSON for {req.symbol} {req.timeframe}. Return ONLY the JSON object."
+        f"Generate a complete strategy JSON for {symbol} {req.timeframe}. "
+        f"The symbol field MUST be exactly \"{symbol}\". Return ONLY the JSON object."
     )
 
     # AI 호출
-    raw_text = await _call_llm(SYSTEM_PROMPT, user_prompt)
+    raw_text = await _call_llm(system_prompt, user_prompt)
 
     # JSON 파싱
     try:
@@ -323,7 +356,6 @@ async def generate_strategy(
             text = text.split("```")[1]
             if text.startswith("json"):
                 text = text[4:]
-        # JSON 블록만 추출
         start = text.find("{")
         end = text.rfind("}") + 1
         if start == -1 or end == 0:
@@ -334,17 +366,25 @@ async def generate_strategy(
         raise HTTPException(status_code=502, detail="AI 응답 파싱 실패. 다시 시도해주세요.")
 
     # 필수 필드 검증
-    for field in ["symbol", "timeframe", "entry_conditions", "exit_conditions", "risk"]:
+    for field in ["entry_conditions", "exit_conditions", "risk"]:
         if field not in config:
-            raise HTTPException(status_code=502, detail=f"AI가 올바른 형식을 반환하지 않았습니다 (missing: {field}). 다시 시도해주세요.")
+            raise HTTPException(
+                status_code=502,
+                detail=f"AI가 올바른 형식을 반환하지 않았습니다 (missing: {field}). 다시 시도해주세요."
+            )
+
+    # 심볼/타임프레임/거래소를 요청값으로 강제 덮어씀 (AI가 잘못 반환해도 안전)
+    config["symbol"] = symbol
+    config["timeframe"] = req.timeframe
+    config["exchange"] = req.exchange
 
     # 전략 저장
-    name = req.strategy_name or f"AI전략 {req.symbol} {req.timeframe}"
-    cfg = get_ai_config()
+    name = req.strategy_name or f"AI전략 {symbol} {req.timeframe}"
+    ai_cfg = get_ai_config()
     strategy = Strategy(
         user_id=user.id,
         name=name,
-        description=f"AI 자동 생성 ({cfg.get('provider','ollama')} / {req.symbol} {req.timeframe})",
+        description=f"AI 자동 생성 ({ai_cfg.get('provider','ollama')} / {symbol} {req.timeframe})",
         config=config,
         is_paper=True,
         is_active=False,

@@ -484,8 +484,13 @@ function fmtKst(iso: string): string {
 
 function LogRow({ t }: { t: AutoBotTradeLog | AutoBotTradeDB }) {
   const pos = t.pnl_pct >= 0
-  const reasonLabel = REASON_LABEL[t.exit_reason] ?? t.exit_reason
-  const reasonColor = REASON_COLOR[t.exit_reason] ?? 'bg-surface-600 text-slate-400'
+  // stop_loss인데 수익이면 "손절"이 아닌 "SL보호" (진입가 위에서 SL 발동)
+  const reasonLabel = t.exit_reason === 'stop_loss'
+    ? (t.pnl_pct > 0 ? 'SL보호' : '손절')
+    : (REASON_LABEL[t.exit_reason] ?? t.exit_reason)
+  const reasonColor = t.exit_reason === 'stop_loss'
+    ? (t.pnl_pct > 0 ? 'bg-amber-500/20 text-amber-400' : 'bg-down/20 text-down')
+    : (REASON_COLOR[t.exit_reason] ?? 'bg-surface-600 text-slate-400')
   const stratColor  = STRATEGY_COLORS[('strategy_type' in t ? t.strategy_type : undefined) ?? 'standard'] ?? STRATEGY_COLORS.standard
   const investKrw   = Math.round(t.avg_price * t.total_amount)
   const exitKrw     = Math.round(t.exit_price * t.total_amount)
@@ -1011,6 +1016,31 @@ function AiLogEntry({ entry }: { entry: AiAnalysisLogEntry }) {
               </span>
             </div>
             <p className="text-slate-400 mt-1">{entry.reason}</p>
+          </div>
+          <span className="text-slate-600 flex-shrink-0">{entry.at}</span>
+        </div>
+      </div>
+    )
+  }
+
+  if (type === 'surge_override') {
+    return (
+      <div className="py-3 border-b border-surface-700 last:border-0 text-xs space-y-1">
+        <div className="flex items-start gap-2">
+          <TrendingUp size={14} className="mt-0.5 flex-shrink-0 text-up" />
+          <div className="flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-medium text-slate-200">급등 오버라이드 진입</span>
+              <span className="text-slate-300 font-mono">{entry.symbol}</span>
+              <span className="px-1.5 py-0.5 rounded bg-up/20 text-up font-medium">
+                vol {entry.volume_ratio?.toFixed(1)}x
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-up/20 text-up font-medium">
+                {entry.price_change_pct !== undefined ? `+${entry.price_change_pct.toFixed(1)}%` : ''}
+              </span>
+              <span className="text-slate-500">점수 {entry.score}</span>
+            </div>
+            <p className="text-slate-400 mt-1">BTC 국면 무관 · short 스타일 적용</p>
           </div>
           <span className="text-slate-600 flex-shrink-0">{entry.at}</span>
         </div>

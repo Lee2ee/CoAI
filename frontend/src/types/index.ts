@@ -237,7 +237,7 @@ export interface AutoBotSettings {
 
 export interface AiAnalysisLogEntry {
   at: string
-  type: 'regime_change' | 'loss_analysis' | 'entry_blocked' | 'exit_action'
+  type: 'regime_change' | 'loss_analysis' | 'entry_blocked' | 'exit_action' | 'surge_override'
   regime?: string
   style?: string
   reason?: string
@@ -248,6 +248,9 @@ export interface AiAnalysisLogEntry {
   pnl_pct?: number
   issue?: string
   adjusted?: string[]
+  volume_ratio?: number
+  price_change_pct?: number
+  score?: number
 }
 
 export interface StylePreset {

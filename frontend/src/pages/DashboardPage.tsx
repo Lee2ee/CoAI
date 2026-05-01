@@ -202,9 +202,21 @@ function BotCard({ bot }: { bot: BotState }) {
 
 // ─── AI 자동 전략 생성 ───────────────────────────────────────────────────────
 
+// scanner.py SCAN_SYMBOLS와 동일하게 유지
+const SCAN_SYMBOLS = [
+  'BTC/KRW', 'ETH/KRW', 'XRP/KRW', 'SOL/KRW', 'DOGE/KRW',
+  'ADA/KRW', 'AVAX/KRW', 'LINK/KRW', 'DOT/KRW', 'ATOM/KRW',
+  'MATIC/KRW', 'LTC/KRW', 'BCH/KRW', 'ETC/KRW', 'TRX/KRW',
+  'NEAR/KRW', 'APT/KRW', 'OP/KRW', 'SUI/KRW', 'SEI/KRW',
+  'SAND/KRW', 'MANA/KRW', 'ALGO/KRW', 'HBAR/KRW', 'VET/KRW',
+]
+
 function AutoStrategyModal({ onClose, symbol }: { onClose: () => void; symbol: string }) {
   const qc = useQueryClient()
-  const [reqSymbol, setReqSymbol] = useState(symbol)
+  // 현재 선택 심볼이 지원 목록에 있으면 사용, 없으면 BTC/KRW
+  const [reqSymbol, setReqSymbol] = useState(
+    SCAN_SYMBOLS.includes(symbol) ? symbol : 'BTC/KRW'
+  )
   const [timeframe, setTimeframe] = useState('1h')
   const [result, setResult] = useState<{ strategy_id: number; name: string; config: unknown; market_summary: string } | null>(null)
 
@@ -237,13 +249,16 @@ function AutoStrategyModal({ onClose, symbol }: { onClose: () => void; symbol: s
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-xs text-slate-400 mb-1 block">심볼</label>
-              <input
+              <label className="text-xs text-slate-400 mb-1 block">종목 선택</label>
+              <select
                 className="input"
                 value={reqSymbol}
                 onChange={e => setReqSymbol(e.target.value)}
-                placeholder="BTC/KRW"
-              />
+              >
+                {SCAN_SYMBOLS.map(s => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
             </div>
             <div>
               <label className="text-xs text-slate-400 mb-1 block">타임프레임</label>
@@ -297,14 +312,14 @@ function AutoStrategyModal({ onClose, symbol }: { onClose: () => void; symbol: s
 
           <div>
             <p className="text-xs text-slate-400 mb-1">AI 분석 요약</p>
-            <pre className="bg-surface-700 rounded-lg p-3 text-xs text-slate-300 overflow-auto max-h-40 whitespace-pre-wrap">
+            <pre className="bg-surface-700 rounded-lg p-3 text-xs text-slate-300 overflow-auto max-h-32 whitespace-pre-wrap">
               {result.market_summary}
             </pre>
           </div>
 
           <div>
             <p className="text-xs text-slate-400 mb-1">생성된 전략 설정</p>
-            <pre className="bg-surface-700 rounded-lg p-3 text-xs text-slate-300 overflow-auto max-h-48">
+            <pre className="bg-surface-700 rounded-lg p-3 text-xs text-slate-300 overflow-auto max-h-36">
               {JSON.stringify(result.config, null, 2)}
             </pre>
           </div>

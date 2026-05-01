@@ -56,10 +56,10 @@ TIMEFRAME_MINUTES: dict[str, int] = {
 # mid      : EMA/RSI 중심 (추세 추종)
 # long     : RSI/EMA 중심 (과매도 반등 + 추세 전환)
 STYLE_SCORE_WEIGHTS: dict[str, dict[str, float]] = {
-    "scalping": {"rsi": 0.4, "ema": 0.5, "macd": 1.6, "volume": 1.5},
-    "short":    {"rsi": 1.0, "ema": 1.0, "macd": 1.0, "volume": 1.0},
-    "mid":      {"rsi": 1.3, "ema": 1.5, "macd": 0.8, "volume": 0.7},
-    "long":     {"rsi": 1.6, "ema": 1.8, "macd": 0.5, "volume": 0.5},
+    "scalping": {"rsi": 0.4, "ema": 0.5, "macd": 1.6, "volume": 1.5, "candle": 0.8, "rsi_bounce": 0.7},
+    "short":    {"rsi": 1.0, "ema": 1.0, "macd": 1.0, "volume": 1.0, "candle": 1.0, "rsi_bounce": 1.0},
+    "mid":      {"rsi": 1.3, "ema": 1.5, "macd": 0.8, "volume": 0.7, "candle": 1.3, "rsi_bounce": 1.3},
+    "long":     {"rsi": 1.6, "ema": 1.8, "macd": 0.5, "volume": 0.5, "candle": 1.5, "rsi_bounce": 1.5},
 }
 
 # ── 전략별 × 스타일별 SL/TP ─────────────────────────────────────────────────
@@ -114,6 +114,138 @@ STRATEGY_CONFIGS: dict[str, dict] = {
     }
     for k, v in STRATEGY_STYLE_CONFIGS.items()
 }
+
+
+def _detect_candle_patterns(df: pd.DataFrame) -> tuple[list[str], int]:
+    """
+    주요 반등 캔들 패턴 감지 (최근 3봉 기준).
+
+    감지 패턴:
+      망치형(Hammer)         - 아래 꼬리 ≥ 2 × 몸통, 위 꼬리 작음
+      불리시 인걸핑           - 이전 하락봉을 현재 상승봉이 완전히 감쌈
+      피어싱 라인             - 이전 하락봉의 중간 이상 상승 마감
+      도지 저점 반전          - 몸통 극소 + 아래 꼬리 존재 → 매도세 소진
+      모닝스타               - 하락봉 → 도지 → 상승봉 3봉 패턴
+
+    Returns: (signals, score_bonus)
+    """
+    if len(df) < 3:
+        return [], 0
+
+    signals: list[str] = []
+    score = 0
+
+    o0, h0, l0, c0 = (float(df[c].iloc[-1]) for c in ("open", "high", "low", "close"))
+    o1, h1, l1, c1 = (float(df[c].iloc[-2]) for c in ("open", "high", "low", "close"))
+    o2, _,  _,  c2 = (float(df[c].iloc[-3]) for c in ("open", "high", "low", "close"))
+
+    body0  = abs(c0 - o0)
+    total0 = h0 - l0 if h0 > l0 else 1e-9
+    body1  = abs(c1 - o1)
+
+    lower_wick0 = min(o0, c0) - l0
+    upper_wick0 = h0 - max(o0, c0)
+
+    # ── 망치형 / 핀바 ──────────────────────────────────────────────────────
+    if lower_wick0 >= 2.0 * body0 and upper_wick0 <= 0.5 * body0 and body0 > 0:
+        signals.append("망치형 캔들")
+        score += 15
+
+    # ── 불리시 인걸핑 ──────────────────────────────────────────────────────
+    if (c1 < o1              # 이전: 하락봉
+            and c0 > o0      # 현재: 상승봉
+            and o0 <= c1     # 현재 시가 ≤ 이전 종가
+            and c0 >= o1):   # 현재 종가 ≥ 이전 시가
+        signals.append("불리시 인걸핑")
+        score += 18
+
+    # ── 피어싱 라인 ────────────────────────────────────────────────────────
+    mid1 = (o1 + c1) / 2
+    if (c1 < o1 and c0 > o0
+            and o0 < l1          # 시가가 이전 저가 아래
+            and c0 > mid1        # 종가가 이전 봉 중간 이상
+            and c0 < o1):        # 종가가 이전 시가 미만(인걸핑과 구분)
+        signals.append("피어싱 라인")
+        score += 12
+
+    # ── 도지 저점 반전 ─────────────────────────────────────────────────────
+    if body0 / total0 < 0.15 and lower_wick0 > total0 * 0.3:
+        signals.append("도지 저점 반전")
+        score += 10
+
+    # ── 모닝스타 (3봉) ─────────────────────────────────────────────────────
+    if (c2 < o2                         # 1봉: 하락
+            and body1 < body0 * 0.5     # 2봉: 작은 몸통(도지성)
+            and c0 > o0                 # 3봉: 상승
+            and c0 > (o2 + c2) / 2):    # 3봉 종가가 1봉 중간 이상
+        signals.append("모닝스타")
+        score += 20
+
+    return signals, score
+
+
+def _detect_rsi_bounce(
+    close: pd.Series, rsi_series: pd.Series
+) -> tuple[list[str], int, bool]:
+    """
+    RSI 저점 반등 및 불리시 다이버전스 감지.
+
+    감지 항목:
+      과매도 반등   - RSI가 45 이하에서 2봉 연속 상승 (추세 전환 초입)
+      단기 반등     - RSI < 35에서 1봉 반등
+      불리시 다이버전스 - 가격은 전 저점 근처인데 RSI는 전 저점보다 높음
+                        (매도세 약화 신호)
+
+    Returns: (signals, score_bonus, is_bounce)
+    """
+    if len(close) < 10 or rsi_series is None:
+        return [], 0, False
+
+    rsi_vals = rsi_series.dropna()
+    if len(rsi_vals) < 4:
+        return [], 0, False
+
+    signals: list[str] = []
+    score = 0
+    is_bounce = False
+
+    rsi_now   = float(rsi_vals.iloc[-1])
+    rsi_prev  = float(rsi_vals.iloc[-2])
+    rsi_prev2 = float(rsi_vals.iloc[-3])
+
+    # ── 과매도 구간 2봉 연속 RSI 상승 ─────────────────────────────────────
+    if rsi_now > rsi_prev > rsi_prev2 and rsi_prev2 < 45:
+        signals.append(f"RSI 반등 시작 ({rsi_prev2:.1f}→{rsi_now:.1f})")
+        score += 14
+        is_bounce = True
+
+    # ── 단기 과매도 1봉 반등 ──────────────────────────────────────────────
+    elif rsi_prev < 35 and rsi_now > rsi_prev:
+        signals.append(f"RSI 과매도 반등 ({rsi_prev:.1f}→{rsi_now:.1f})")
+        score += 10
+        is_bounce = True
+
+    # ── 불리시 다이버전스 ─────────────────────────────────────────────────
+    # 최근 5~14봉 구간에서 가격 저점 vs RSI 저점 비교
+    lookback = min(14, len(close) - 1)
+    if lookback >= 5:
+        window_close = close.iloc[-lookback - 1:-1]
+        window_rsi   = rsi_vals.iloc[-lookback - 1:-1] if len(rsi_vals) > lookback else rsi_vals
+
+        if len(window_close) > 0 and len(window_rsi) > 0:
+            prev_low_price = float(window_close.min())
+            prev_low_rsi   = float(window_rsi.min())
+            close_now      = float(close.iloc[-1])
+
+            # 가격은 이전 저점 근처인데 RSI는 더 높음 → 하락 모멘텀 약화
+            if (close_now <= prev_low_price * 1.03
+                    and rsi_now > prev_low_rsi + 4
+                    and rsi_now < 55):
+                signals.append(f"RSI 불리시 다이버전스 ({prev_low_rsi:.1f}→{rsi_now:.1f})")
+                score += 18
+                is_bounce = True
+
+    return signals, score, is_bounce
 
 
 def _daily_volume_krw(df: pd.DataFrame, timeframe: str) -> float:
@@ -210,11 +342,13 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
         # ── 거래량 (기본 20점, 가중치 적용) ────────────────────────────────
         volume_breakout = False
         vol_pts = 0
+        vol_ratio_val = 0.0
         if len(volume) >= 21:
             vol_avg = float(volume.iloc[-21:-1].mean())
             vol_now = float(volume.iloc[-1])
             if vol_avg > 0:
                 ratio = vol_now / vol_avg
+                vol_ratio_val = ratio
                 if ratio >= 3.0:
                     vol_pts = 20
                     signals.append(f"거래량 급증 ({ratio:.1f}x)")
@@ -227,11 +361,35 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
                     signals.append(f"거래량 소폭 증가 ({ratio:.1f}x)")
         score += int(vol_pts * weights["volume"])
 
-        # ── 전략 자동 분류 (스타일에 따라 자연스럽게 다른 전략이 선택됨) ──
-        # 가중치로 인해:
-        #   scalping → MACD/거래량 점수가 높아 macd_momentum/volume_breakout 빈번
-        #   long     → RSI/EMA 점수가 높아 oversold_bounce/golden_cross 빈번
+        # ── 최근 3봉 가격 변화율 (급등 감지용) ─────────────────────────────
+        price_now = float(close.iloc[-1])
+        price_3ago = float(close.iloc[-4]) if len(close) >= 4 else price_now
+        price_change_pct_val = (price_now - price_3ago) / price_3ago * 100 if price_3ago > 0 else 0.0
+
+        # ── 캔들 패턴 감지 ──────────────────────────────────────────────────
+        candle_signals, candle_pts = _detect_candle_patterns(df)
+        signals.extend(candle_signals)
+        score += int(candle_pts * weights["candle"])
+        has_reversal_candle = len(candle_signals) > 0
+
+        # ── RSI 저점 반등 / 불리시 다이버전스 ──────────────────────────────
+        rsi_bounce_signals, rsi_bounce_pts, rsi_is_bounce = _detect_rsi_bounce(close, rsi_s)
+        signals.extend(rsi_bounce_signals)
+        score += int(rsi_bounce_pts * weights["rsi_bounce"])
+
+        # ── 전략 자동 분류 ──────────────────────────────────────────────────
+        # 우선순위:
+        #   1. RSI 강한 과매도 → oversold_bounce
+        #   2. RSI 반등 + 캔들 패턴 → oversold_bounce (하락봉 저점 진입)
+        #   3. EMA 골든크로스 → golden_cross
+        #   4. MACD 크로스 + 거래량 돌파 → volume_breakout
+        #   5. MACD 크로스 → macd_momentum
+        #   6. 거래량 돌파 (EMA 상단 또는 RSI 반등 확인) → volume_breakout
+        #   7. RSI 반등만 단독 → oversold_bounce (낮은 신뢰도)
         if rsi_strong_oversold:
+            strategy_type = "oversold_bounce"
+        elif rsi_is_bounce and has_reversal_candle:
+            # 핵심 개선: 하락봉 저점에서 RSI 반등 + 캔들 패턴 동시 확인
             strategy_type = "oversold_bounce"
         elif golden_cross:
             strategy_type = "golden_cross"
@@ -239,8 +397,11 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
             strategy_type = "volume_breakout"
         elif macd_cross:
             strategy_type = "macd_momentum"
-        elif volume_breakout and above_ema20:
+        elif volume_breakout and (above_ema20 or rsi_is_bounce):
+            # 거래량 돌파: EMA 상단 OR RSI 반등으로 확인 (기존보다 조건 완화)
             strategy_type = "volume_breakout"
+        elif rsi_is_bounce:
+            strategy_type = "oversold_bounce"
         else:
             strategy_type = "standard"
 
@@ -250,16 +411,19 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
         tp_pct = style_cfg.get("tp_pct")
 
         return {
-            "symbol":         symbol,
-            "score":          min(score, 100),
-            "rsi":            round(rsi, 1),
-            "price":          float(close.iloc[-1]),
-            "signals":        signals,
-            "strategy_type":  strategy_type,
-            "strategy_label": _STRATEGY_LABELS[strategy_type],
-            "sl_pct":         sl_pct,
-            "tp_pct":         tp_pct,
-            "style":          style,
+            "symbol":           symbol,
+            "score":            min(score, 100),
+            "rsi":              round(rsi, 1),
+            "price":            float(close.iloc[-1]),
+            "signals":          signals,
+            "strategy_type":    strategy_type,
+            "strategy_label":   _STRATEGY_LABELS[strategy_type],
+            "sl_pct":           sl_pct,
+            "tp_pct":           tp_pct,
+            "style":            style,
+            # 급등 감지용
+            "volume_ratio":     round(vol_ratio_val, 2),
+            "price_change_pct": round(price_change_pct_val, 2),
         }
 
     except Exception as e:

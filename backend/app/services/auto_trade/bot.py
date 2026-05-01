@@ -447,21 +447,30 @@ class AutoTradeBot:
         if time.time() - self._last_regime_at < 900:   # 15분 이내면 스킵
             return
 
-        btc = next((r for r in scan_results if r["symbol"] == "BTC/KRW"), None)
-        if btc is None:
-            return
-
         try:
-            # scanner 결과에서 BTC 지표 추출 (closes 직접 조회는 비용 절약을 위해 생략)
-            btc_rsi = btc.get("rsi", 50.0)
-            btc_price = btc.get("price", 0.0)
-            # 최근 종가 근사: 단일 가격으로 패턴 대신 score/rsi 전달
-            closes_approx = [btc_price] * 20   # 실제 봉 대신 현재가로 대체 (API 호출 절약)
+            # 실제 BTC OHLCV로 정확한 국면 분석 (단일 API 호출, 15분 캐시로 부담 적음)
+            btc_df = await asyncio.wait_for(
+                self._connector.fetch_ohlcv("BTC/KRW", self.settings["timeframe"], limit=25),
+                timeout=12,
+            )
+            if btc_df is None or len(btc_df) < 20:
+                logger.debug("AutoBot 국면 감지: BTC 데이터 부족, 스킵")
+                return
+
+            btc_closes = [float(x) for x in btc_df["close"].tolist()]
+            vol_series = btc_df["volume"]
+            vol_avg = float(vol_series.iloc[-21:-1].mean()) if len(vol_series) >= 21 else 1.0
+            vol_now  = float(vol_series.iloc[-1])
+            btc_volume_ratio = round(vol_now / vol_avg, 2) if vol_avg > 0 else 1.0
+
+            # RSI는 스캔 결과에서 재사용 (이미 계산됨)
+            btc_scan = next((r for r in scan_results if r["symbol"] == "BTC/KRW"), None)
+            btc_rsi  = btc_scan.get("rsi", 50.0) if btc_scan else 50.0
 
             regime = await ai_analyst.detect_regime(
-                btc_closes=closes_approx,
+                btc_closes=btc_closes,
                 btc_rsi=btc_rsi,
-                btc_volume_ratio=1.0,
+                btc_volume_ratio=btc_volume_ratio,
             )
             import time as _t
             self._last_regime_at = _t.time()
@@ -574,10 +583,11 @@ class AutoTradeBot:
                         )
 
                     elif new_score < self.settings["min_score"] and not pos.get("trailing_active"):
-                        # 신호 약화 → 이익 구간이면 SL을 위로 당겨 이익 보호
+                        # 신호 약화 → 이익이 충분한 경우에만 SL을 위로 당겨 이익 보호
+                        # (너무 이른 SL 상향 방지: protect_pct*2 이상 이익일 때만 적용)
                         pnl_pct = pos.get("unrealized_pnl_pct", 0)
-                        if pnl_pct > 0:
-                            protect_pct = STYLE_SL_PROTECT_PCT.get(style, 0.5)
+                        protect_pct = STYLE_SL_PROTECT_PCT.get(style, 0.5)
+                        if pnl_pct >= protect_pct * 2:
                             new_sl = pos["avg_price"] * (1 + (pnl_pct - protect_pct) / 100)
                             if new_sl > pos["stop_loss_price"]:
                                 pos["stop_loss_price"] = new_sl
@@ -682,7 +692,17 @@ class AutoTradeBot:
                 symbol = candidate["symbol"]
                 if symbol in self._positions:
                     continue
-                if candidate["score"] < self.settings["min_score"]:
+
+                # ── 급등 오버라이드 감지 ─────────────────────────────────────
+                # BTC 흐름과 무관하게 개별 종목 거래량 3배+ & 3봉 가격 3%+ 상승 시
+                # regime 스타일·min_score 제약을 완화하고 short 스타일로 즉시 대응
+                is_surge = (
+                    candidate.get("volume_ratio", 0.0) >= 3.0
+                    and candidate.get("price_change_pct", 0.0) >= 3.0
+                )
+                min_score_for_entry = 50 if is_surge else self.settings["min_score"]
+
+                if candidate["score"] < min_score_for_entry:
                     continue
 
                 # 실적 게이팅
@@ -703,7 +723,9 @@ class AutoTradeBot:
                         signals=candidate.get("signals", []),
                         rsi=candidate.get("rsi", 50.0),
                     )
-                    if not ai_result["enter"] or ai_result["confidence"] < 65:
+                    # 급등 종목은 AI 블록 confidence 기준을 50으로 완화
+                    ai_block_threshold = 50 if is_surge else 65
+                    if not ai_result["enter"] or ai_result["confidence"] < ai_block_threshold:
                         logger.info(
                             f"AutoBot AI 진입 거부 {symbol}: "
                             f"confidence={ai_result['confidence']} reason={ai_result['reason']}"
@@ -721,18 +743,40 @@ class AutoTradeBot:
                         continue
                     size_multiplier = ai_result["size_multiplier"]
 
-                # AI 포지션별 매매 스타일 선택 (AI 미설정 시 글로벌 스타일 유지)
-                position_style = style
-                if ai_analyst.is_ai_available() and self.settings.get("ai_entry_validation", True):
-                    style_result = await ai_analyst.choose_position_style(
-                        symbol=symbol,
-                        strategy_type=candidate.get("strategy_type", "standard"),
-                        rsi=candidate.get("rsi", 50.0),
-                        score=candidate["score"],
-                        signals=candidate.get("signals", []),
-                        global_style=style,
+                # 포지션 스타일 결정
+                if is_surge:
+                    # 급등 종목: short 스타일 고정 (빠른 익절 대응)
+                    position_style = "short"
+                    logger.info(
+                        f"AutoBot 급등 오버라이드 진입 {symbol}: "
+                        f"vol={candidate.get('volume_ratio', 0):.1f}x  "
+                        f"change={candidate.get('price_change_pct', 0):+.1f}%  "
+                        f"score={candidate['score']}  style→short"
                     )
-                    position_style = style_result["style"]
+                    log_entry = {
+                        "at":               datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+                        "type":             "surge_override",
+                        "symbol":           symbol,
+                        "volume_ratio":     candidate.get("volume_ratio", 0),
+                        "price_change_pct": candidate.get("price_change_pct", 0),
+                        "score":            candidate["score"],
+                    }
+                    self._analysis_log.insert(0, log_entry)
+                    if len(self._analysis_log) > 20:
+                        self._analysis_log.pop()
+                else:
+                    # AI 포지션별 매매 스타일 선택 (AI 미설정 시 글로벌 스타일 유지)
+                    position_style = style
+                    if ai_analyst.is_ai_available() and self.settings.get("ai_entry_validation", True):
+                        style_result = await ai_analyst.choose_position_style(
+                            symbol=symbol,
+                            strategy_type=candidate.get("strategy_type", "standard"),
+                            rsi=candidate.get("rsi", 50.0),
+                            score=candidate["score"],
+                            signals=candidate.get("signals", []),
+                            global_style=style,
+                        )
+                        position_style = style_result["style"]
 
                 await self._open_position(symbol, candidate, size_multiplier=size_multiplier, position_style=position_style)
                 await asyncio.sleep(0.3)

@@ -454,19 +454,19 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }
 const STRATEGY_META: Record<string, { border: string; bg: string; badge: string; icon: string; desc: string }> = {
   oversold_bounce: {
     border: 'border-blue-500/30', bg: 'bg-blue-500/10', badge: 'bg-blue-500/20 text-blue-300',
-    icon: '↘', desc: 'RSI 과매도 구간에서 반등을 狙います。낮은 손절 / 중간 익절로 빠른 수익 실현',
+    icon: '↘', desc: 'RSI 과매도 구간 반등 노림. 낮은 손절 / 중간 익절로 빠른 수익 실현',
   },
   golden_cross: {
     border: 'border-amber-500/30', bg: 'bg-amber-500/10', badge: 'bg-amber-500/20 text-amber-300',
-    icon: '✕', desc: 'EMA20이 EMA50을 상향 돌파 — 추세 전환 신호。넓은 익절로 추세 수익 극대화',
+    icon: '✕', desc: 'EMA20이 EMA50을 상향 돌파 — 추세 전환 신호. 넓은 익절로 추세 수익 극대화',
   },
   macd_momentum: {
     border: 'border-purple-500/30', bg: 'bg-purple-500/10', badge: 'bg-purple-500/20 text-purple-300',
-    icon: '↗', desc: 'MACD 골든크로스 모멘텀 포착。중간 SL / 넓은 TP로 추세 탑승',
+    icon: '↗', desc: 'MACD 골든크로스 모멘텀 포착. 중간 SL / 넓은 TP로 추세 탑승',
   },
   volume_breakout: {
     border: 'border-green-500/30', bg: 'bg-green-500/10', badge: 'bg-green-500/20 text-green-300',
-    icon: '⚡', desc: 'MACD 크로스 + 거래량 급증 동시 발생 — 강한 돌파 신호。가장 넓은 익절 목표',
+    icon: '⚡', desc: 'MACD 크로스 + 거래량 급증 동시 발생 — 강한 돌파 신호. 가장 넓은 익절 목표',
   },
   standard: {
     border: 'border-surface-600', bg: 'bg-surface-700', badge: 'bg-surface-600 text-slate-400',
@@ -480,9 +480,12 @@ function StrategyBanner({ pos }: { pos: AutoBotPosition }) {
   const meta = STRATEGY_META[type] ?? STRATEGY_META.standard
 
   // 실제 SL/TP % 역산 (avg_price 기준)
-  const slPct = pos.avg_price > 0
-    ? ((pos.avg_price - pos.stop_loss_price) / pos.avg_price * 100).toFixed(1)
-    : '—'
+  // SL이 진입가 위로 올라간 경우(SL보호) stop_loss_price > avg_price → 음수 방지
+  const slRaw = pos.avg_price > 0
+    ? (pos.avg_price - pos.stop_loss_price) / pos.avg_price * 100
+    : null
+  const slAboveEntry = slRaw !== null && slRaw < 0
+  const slPct = slRaw !== null ? Math.abs(slRaw).toFixed(1) : '—'
   const tpPct = pos.avg_price > 0
     ? ((pos.take_profit_price - pos.avg_price) / pos.avg_price * 100).toFixed(1)
     : '—'
@@ -495,7 +498,12 @@ function StrategyBanner({ pos }: { pos: AutoBotPosition }) {
           {label}
         </span>
         <span className="text-xs text-slate-500 ml-auto flex items-center gap-3">
-          <span>손절 <span className="text-down font-semibold">-{slPct}%</span></span>
+          <span>
+            {slAboveEntry ? 'SL보호 ' : '손절 '}
+            <span className={slAboveEntry ? 'text-amber-400 font-semibold' : 'text-down font-semibold'}>
+              {slAboveEntry ? '+' : '-'}{slPct}%
+            </span>
+          </span>
           <span>익절 <span className="text-up font-semibold">+{tpPct}%</span></span>
           <span>AI점수 <span className="text-brand-400 font-semibold">{pos.score}점</span></span>
         </span>
