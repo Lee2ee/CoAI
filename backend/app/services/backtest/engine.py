@@ -13,7 +13,7 @@ from ..risk.manager import RiskManager
 @dataclass
 class BacktestConfig:
     initial_capital: float = 10_000.0
-    fee_rate: float = 0.001       # 0.1% 수수료
+    fee_rate: float = 0.0005      # 0.05% 수수료 (업비트 KRW 기준)
     slippage_pct: float = 0.05    # 0.05% 슬리피지
     position_size_pct: float = 10.0
 
