@@ -25,10 +25,11 @@ import logging
 import pandas_ta as ta
 import pandas as pd
 from ..exchange.connector import ExchangeConnector
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# 스캔 대상: 업비트 거래량 상위 주요 종목
+# 스캔 대상 고정 목록 (동적 발굴 실패 시 fallback)
 SCAN_SYMBOLS = [
     "BTC/KRW", "ETH/KRW", "XRP/KRW", "SOL/KRW", "DOGE/KRW",
     "ADA/KRW", "AVAX/KRW", "LINK/KRW", "DOT/KRW", "ATOM/KRW",
@@ -36,6 +37,11 @@ SCAN_SYMBOLS = [
     "NEAR/KRW", "APT/KRW", "OP/KRW", "SUI/KRW", "SEI/KRW",
     "SAND/KRW", "MANA/KRW", "ALGO/KRW", "HBAR/KRW", "VET/KRW",
 ]
+
+# 동적 종목 캐시 (업비트 전체 KRW 거래량 순위, 30분 갱신)
+_dyn_all_krw: list[str] = []
+_dyn_all_ts: float = 0.0
+_DYN_TTL: float = 1800.0
 
 # 매매 스타일별 최소 일 거래대금 (KRW)
 STYLE_MIN_DAILY_VOLUME_KRW: dict[str, float] = {
@@ -48,6 +54,13 @@ STYLE_MIN_DAILY_VOLUME_KRW: dict[str, float] = {
 TIMEFRAME_MINUTES: dict[str, int] = {
     "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
     "1h": 60, "4h": 240, "1d": 1440,
+}
+
+# 멀티 타임프레임 상위봉 매핑 (신호 확인용)
+HTF_MAP: dict[str, str] = {
+    "1m": "15m", "3m": "15m", "5m": "1h",
+    "15m": "1h",  "30m": "4h", "1h": "4h",
+    "4h": "1d",   "1d": "1d",
 }
 
 # ── 스타일별 지표 가중치 ─────────────────────────────────────────────────────
@@ -248,6 +261,93 @@ def _detect_rsi_bounce(
     return signals, score, is_bounce
 
 
+def _detect_advanced_patterns(df: pd.DataFrame) -> tuple[list[str], int]:
+    """
+    고급 캔들 패턴 감지 (TODO 8).
+
+    감지 패턴:
+      상승 하라미          - 이전 큰 하락봉 안에 현재 작은 상승봉
+      상승 삼병사          - 3봉 연속 상승, 종가·시가 계속 상승
+      이중 바닥            - 최근 20봉 내 유사한 두 저점 + 중간 고점
+      볼린저밴드 하단 반등 - 이전봉 BB 하단 터치 → 현재봉 상승 마감
+      역헤드앤숄더         - 최근 15봉 중앙 저점이 양측보다 낮고 유사한 어깨
+    """
+    if len(df) < 20:
+        return [], 0
+
+    signals: list[str] = []
+    score = 0
+
+    o0 = float(df["open"].iloc[-1]);  c0 = float(df["close"].iloc[-1])
+    o1 = float(df["open"].iloc[-2]);  c1 = float(df["close"].iloc[-2])
+    o2 = float(df["open"].iloc[-3]);  c2 = float(df["close"].iloc[-3])
+
+    body0 = abs(c0 - o0)
+    body1 = abs(c1 - o1)
+    body2 = abs(c2 - o2)
+
+    # ── 상승 하라미 ─────────────────────────────────────────────────────────
+    if (c1 < o1                              # 이전: 하락봉
+            and c0 > o0                      # 현재: 상승봉
+            and min(o0, c0) >= min(o1, c1)   # 현재 몸통이 이전 몸통 내부
+            and max(o0, c0) <= max(o1, c1)
+            and body0 < body1 * 0.7):        # 현재 몸통이 이전의 70% 미만
+        signals.append("상승 하라미")
+        score += 12
+
+    # ── 상승 삼병사 ─────────────────────────────────────────────────────────
+    if (c0 > o0 and c1 > o1 and c2 > o2   # 3봉 모두 상승봉
+            and c0 > c1 > c2               # 종가 계속 상승
+            and o0 > o1 > o2):             # 시가도 계속 상승
+        signals.append("상승 삼병사")
+        score += 20
+
+    # ── 이중 바닥 ───────────────────────────────────────────────────────────
+    window = df.iloc[-20:]
+    lows  = window["low"].values
+    highs = window["high"].values
+    low1_idx = int(lows[:10].argmin())
+    low2_idx = int(lows[10:].argmin()) + 10
+    low1 = float(lows[low1_idx])
+    low2 = float(lows[low2_idx])
+    if low2_idx > low1_idx + 2 and low1 > 0:
+        mid_high = float(highs[low1_idx + 1: low2_idx].max()) if low2_idx > low1_idx + 1 else 0.0
+        if (abs(low1 - low2) / low1 < 0.03          # 두 저점 3% 이내
+                and mid_high > max(low1, low2) * 1.03  # 중간 고점이 저점보다 3% 이상
+                and c0 > low2 * 1.005):                # 현재 종가가 두 번째 저점 위
+            signals.append("이중 바닥")
+            score += 22
+
+    # ── 볼린저밴드 하단 반등 ────────────────────────────────────────────────
+    try:
+        bb = ta.bbands(df["close"], length=20, std=2.0)
+        if bb is not None and not bb.empty and len(bb.dropna()) >= 2:
+            bb_lower = float(bb.iloc[-2, 0])   # 이전봉 하단 밴드
+            l1 = float(df["low"].iloc[-2])
+            if l1 <= bb_lower and c0 > o0:
+                signals.append("볼린저밴드 하단 반등")
+                score += 16
+    except Exception:
+        pass
+
+    # ── 역헤드앤숄더 ────────────────────────────────────────────────────────
+    if len(df) >= 15:
+        lows_15 = df["low"].iloc[-15:].values
+        head_idx = int(lows_15.argmin())
+        if 3 <= head_idx <= 11:
+            head = float(lows_15[head_idx])
+            left_min  = float(lows_15[:head_idx].min())
+            right_min = float(lows_15[head_idx + 1:].min()) if head_idx < 14 else head
+            if (head > 0 and left_min > head * 1.015
+                    and right_min > head * 1.015
+                    and abs(left_min - right_min) / left_min < 0.06   # 양 어깨 6% 이내
+                    and c0 > float(df["close"].iloc[-15 + head_idx])): # 현재가 head보다 위
+                signals.append("역헤드앤숄더")
+                score += 25
+
+    return signals, score
+
+
 def _daily_volume_krw(df: pd.DataFrame, timeframe: str) -> float:
     """캔들 OHLCV로 일 거래대금(KRW) 추정."""
     tf_min = TIMEFRAME_MINUTES.get(timeframe, 60)
@@ -260,7 +360,7 @@ def _daily_volume_krw(df: pd.DataFrame, timeframe: str) -> float:
     return vol_sum
 
 
-def _score(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
+def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional[pd.DataFrame] = None) -> dict:
     """
     기술 지표 점수 계산 + 전략 자동 분류.
     스타일별 가중치를 적용하여 해당 매매 방식에 맞는 신호를 우선시한다.
@@ -366,11 +466,17 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
         price_3ago = float(close.iloc[-4]) if len(close) >= 4 else price_now
         price_change_pct_val = (price_now - price_3ago) / price_3ago * 100 if price_3ago > 0 else 0.0
 
-        # ── 캔들 패턴 감지 ──────────────────────────────────────────────────
+        # ── 기본 캔들 패턴 감지 ─────────────────────────────────────────────
         candle_signals, candle_pts = _detect_candle_patterns(df)
         signals.extend(candle_signals)
         score += int(candle_pts * weights["candle"])
         has_reversal_candle = len(candle_signals) > 0
+
+        # ── 고급 캔들 패턴 (TODO 8) ──────────────────────────────────────────
+        adv_signals, adv_pts = _detect_advanced_patterns(df)
+        signals.extend(adv_signals)
+        score += int(adv_pts * weights["candle"])
+        has_reversal_candle = has_reversal_candle or len(adv_signals) > 0
 
         # ── RSI 저점 반등 / 불리시 다이버전스 ──────────────────────────────
         rsi_bounce_signals, rsi_bounce_pts, rsi_is_bounce = _detect_rsi_bounce(close, rsi_s)
@@ -410,6 +516,26 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
         sl_pct = style_cfg.get("sl_pct")
         tp_pct = style_cfg.get("tp_pct")
 
+        # ── 멀티 타임프레임 추세 확인 (TODO: 멀티TF) ────────────────────────
+        mtf_trend = "neutral"
+        mtf_confirmed = True
+        if htf_df is not None and len(htf_df) >= 20:
+            htf_close = htf_df["close"]
+            htf_e20 = ta.ema(htf_close, length=20)
+            htf_e50 = ta.ema(htf_close, length=50)
+            if htf_e20 is not None and htf_e50 is not None:
+                valid_e20 = htf_e20.dropna()
+                valid_e50 = htf_e50.dropna()
+                if len(valid_e20) > 0 and len(valid_e50) > 0:
+                    e20 = float(valid_e20.iloc[-1])
+                    e50 = float(valid_e50.iloc[-1])
+                    htf_price = float(htf_close.iloc[-1])
+                    if htf_price > e20 and e20 > e50:
+                        mtf_trend = "bullish"
+                    elif htf_price < e20 and e20 < e50:
+                        mtf_trend = "bearish"
+                        mtf_confirmed = False  # 상위봉 하락추세 → 진입 기준 강화
+
         return {
             "symbol":           symbol,
             "score":            min(score, 100),
@@ -424,6 +550,9 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
             # 급등 감지용
             "volume_ratio":     round(vol_ratio_val, 2),
             "price_change_pct": round(price_change_pct_val, 2),
+            # 멀티 타임프레임
+            "mtf_trend":        mtf_trend,
+            "mtf_confirmed":    mtf_confirmed,
         }
 
     except Exception as e:
@@ -432,18 +561,66 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
             "symbol": symbol, "score": 0, "rsi": 50.0, "price": 0.0, "signals": [],
             "strategy_type": "standard", "strategy_label": "표준",
             "sl_pct": None, "tp_pct": None, "style": style,
+            "volume_ratio": 0.0, "price_change_pct": 0.0,
+            "mtf_trend": "neutral", "mtf_confirmed": True,
         }
+
+
+async def _fetch_dynamic_symbols(connector: ExchangeConnector, style: str) -> list[str]:
+    """
+    업비트 전체 KRW 마켓 24h 거래대금 기준 상위 종목 동적 발굴 (TODO 10).
+    30분 캐시 적용 — 스타일별 상위 N 슬라이스만 다름.
+    """
+    global _dyn_all_krw, _dyn_all_ts
+    import time
+
+    if time.time() - _dyn_all_ts < _DYN_TTL and _dyn_all_krw:
+        top_n = {"scalping": 15, "short": 20, "mid": 30, "long": 40}.get(style, 20)
+        symbols = _dyn_all_krw[:top_n]
+        if "BTC/KRW" not in symbols:
+            symbols = ["BTC/KRW"] + symbols
+        return symbols
+
+    try:
+        tickers = await asyncio.wait_for(
+            connector._exchange.fetch_tickers(),
+            timeout=20,
+        )
+        krw_pairs = [
+            (sym, float(data.get("quoteVolume") or 0))
+            for sym, data in tickers.items()
+            if sym.endswith("/KRW")
+        ]
+        krw_pairs.sort(key=lambda x: x[1], reverse=True)
+        _dyn_all_krw = [sym for sym, _ in krw_pairs]
+        _dyn_all_ts = time.time()
+        logger.info(f"동적 종목 발굴: 업비트 KRW {len(_dyn_all_krw)}개 갱신")
+    except Exception as e:
+        logger.warning(f"동적 종목 발굴 실패, 고정 목록 사용: {e}")
+        return SCAN_SYMBOLS
+
+    top_n = {"scalping": 15, "short": 20, "mid": 30, "long": 40}.get(style, 20)
+    symbols = _dyn_all_krw[:top_n]
+    if "BTC/KRW" not in symbols:
+        symbols = ["BTC/KRW"] + symbols
+    return symbols
 
 
 async def scan_market(timeframe: str = "1h", style: str = "short") -> list[dict]:
     """
-    전체 종목 스캔. 스타일별 거래량 필터 + 가중치 점수 적용 후 내림차순 정렬.
+    전체 종목 스캔.
+    - TODO 10: 동적 종목 발굴 (업비트 전체 KRW 거래량 상위)
+    - 멀티 타임프레임: 상위봉 OHLCV 추가 fetch → mtf_confirmed 산출
+    - 스타일별 거래량 필터 + 가중치 점수 → 내림차순 정렬
     """
     connector = ExchangeConnector(exchange_id="upbit", is_paper=True)
     min_vol = STYLE_MIN_DAILY_VOLUME_KRW.get(style, 10_000_000_000)
+    htf = HTF_MAP.get(timeframe, timeframe)
     results = []
 
-    for symbol in SCAN_SYMBOLS:
+    symbols = await _fetch_dynamic_symbols(connector, style)
+
+    for symbol in symbols:
         try:
             df = await asyncio.wait_for(
                 connector.fetch_ohlcv(symbol, timeframe, limit=150),
@@ -459,7 +636,18 @@ async def scan_market(timeframe: str = "1h", style: str = "short") -> list[dict]
                 )
                 continue
 
-            results.append(_score(df, symbol, style))
+            # 멀티 타임프레임 확인 (HTF 가 주 TF와 다를 때만 추가 fetch)
+            htf_df = None
+            if htf != timeframe:
+                try:
+                    htf_df = await asyncio.wait_for(
+                        connector.fetch_ohlcv(symbol, htf, limit=60),
+                        timeout=12,
+                    )
+                except Exception:
+                    pass  # HTF 실패 시 mtf_confirmed=True(기본) 유지
+
+            results.append(_score(df, symbol, style, htf_df=htf_df))
             await asyncio.sleep(0.15)
         except asyncio.TimeoutError:
             logger.debug(f"Timeout scanning {symbol}")

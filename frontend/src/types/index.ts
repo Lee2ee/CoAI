@@ -212,6 +212,8 @@ export interface ScanResult {
   strategy_label: string
   sl_pct: number | null
   tp_pct: number | null
+  mtf_trend?: 'bullish' | 'bearish' | 'neutral'
+  mtf_confirmed?: boolean
 }
 
 export interface AutoBotSettings {
@@ -233,6 +235,8 @@ export interface AutoBotSettings {
   ai_regime_detection: boolean
   ai_loss_analysis: boolean
   ai_exit_assist: boolean
+  max_daily_loss_pct: number
+  max_portfolio_exposure_pct: number
 }
 
 export interface AiAnalysisLogEntry {
@@ -297,6 +301,8 @@ export interface AutoBotStatus {
   }
   ai_consecutive_losses: number
   ai_analysis_log: AiAnalysisLogEntry[]
+  performance: PerformanceStats
+  daily_pnl_krw: number
 }
 
 export interface AutoBotTradeDB {
@@ -328,6 +334,21 @@ export interface AutoBotTradeStats {
   avg_pnl_pct: number
   best_trade_pct: number
   worst_trade_pct: number
+}
+
+export interface PerformanceStats {
+  sharpe_ratio: number
+  sortino_ratio: number
+  calmar_ratio: number
+  profit_factor: number
+  expectancy_pct: number
+  max_drawdown_pct: number
+  avg_win_pct: number
+  avg_loss_pct: number
+  win_rate: number
+  best_trade_pct: number
+  worst_trade_pct: number
+  total_trades: number
 }
 
 export interface User {

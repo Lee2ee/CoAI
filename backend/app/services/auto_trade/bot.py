@@ -17,8 +17,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from ..exchange.connector import ExchangeConnector, PaperBroker
-from .scanner import scan_market, STRATEGY_CONFIGS, STRATEGY_STYLE_CONFIGS, TIMEFRAME_MINUTES
+from .scanner import scan_market, STRATEGY_CONFIGS, STRATEGY_STYLE_CONFIGS, TIMEFRAME_MINUTES, HTF_MAP
 from . import ai_analyst
+from ..risk.manager import PortfolioRiskManager, calc_performance
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,13 @@ class AutoTradeBot:
         }
         self._analysis_log: list[dict] = []        # AI 분석 기록 (최대 20건)
 
+        # 포트폴리오 리스크 관리
+        self._portfolio_risk = PortfolioRiskManager()
+
+        # DB 전략 캐시 (Strategy Builder ↔ AutoBot 연동, TODO 9)
+        self._db_strategy_cache: list[dict] = []
+        self._db_strategy_cache_ts: float = 0.0
+
         self.settings: dict = {
             "trading_style": "short",
             "scan_interval_min": 5,
@@ -183,6 +191,9 @@ class AutoTradeBot:
             "ai_regime_detection": True,   # 시장 국면 자동 감지 + 스타일 조정
             "ai_loss_analysis": True,      # 연속 손절 자기 분석
             "ai_exit_assist": True,        # 이익 구간 청산 타이밍 보조
+            # 포트폴리오 리스크
+            "max_daily_loss_pct": 5.0,     # 일일 총자산 대비 최대 손실 (%)
+            "max_portfolio_exposure_pct": 80.0,  # 최대 투자 비중 (%)
         }
 
     # ── 프로퍼티 ─────────────────────────────────────────────────────────────
@@ -417,6 +428,15 @@ class AutoTradeBot:
                 timeframe=self.settings["timeframe"],
                 style=self.settings["trading_style"],
             )
+
+            # TODO 9: DB 전략 조건 평가 → 스캔 결과에 병합
+            db_candidates = await self._eval_db_strategies(scan_results)
+            if db_candidates:
+                existing_symbols = {r["symbol"] for r in scan_results}
+                for c in db_candidates:
+                    if c["symbol"] not in existing_symbols:
+                        scan_results.append(c)
+
             self._scan_results = scan_results
             self._last_scan_at = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
 
@@ -509,6 +529,85 @@ class AutoTradeBot:
                 logger.info(f"AutoBot AI 국면 감지: {regime['regime']} {' | '.join(changed) if changed else '변경 없음'}")
         except Exception as e:
             logger.debug(f"AutoBot 국면 감지 오류: {e}")
+
+    # ── TODO 9: DB 전략 조건 평가 ────────────────────────────────────────────
+
+    async def _get_active_db_strategies(self) -> list[dict]:
+        """DB에서 is_active=True 전략 로드 (5분 캐시)."""
+        import time
+        if time.time() - self._db_strategy_cache_ts < 300 and self._db_strategy_cache:
+            return self._db_strategy_cache
+        try:
+            from ...core.database import AsyncSessionLocal
+            from ...models.strategy import Strategy
+            from sqlalchemy import select
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(Strategy).where(Strategy.is_active == True)
+                )
+                strategies = result.scalars().all()
+                self._db_strategy_cache = [
+                    {"id": s.id, "name": s.name, "config": s.config}
+                    for s in strategies
+                ]
+                self._db_strategy_cache_ts = time.time()
+                return self._db_strategy_cache
+        except Exception as e:
+            logger.debug(f"AutoBot: DB 전략 로드 실패: {e}")
+            return []
+
+    async def _eval_db_strategies(self, scan_results: list[dict]) -> list[dict]:
+        """
+        DB 전략 진입 조건 평가 → 신규 진입 후보 반환 (TODO 9).
+        이미 스캔된 심볼은 중복 진입 방지 로직에서 제외됨.
+        """
+        if not self._connector:
+            return []
+        strategies = await self._get_active_db_strategies()
+        if not strategies:
+            return []
+
+        from ..indicator.engine import evaluate_conditions
+
+        extra: list[dict] = []
+        for strat in strategies:
+            cfg = strat.get("config", {})
+            symbol   = cfg.get("symbol", "")
+            tf       = cfg.get("timeframe", self.settings["timeframe"])
+            entry_c  = cfg.get("entry_conditions", [])
+            if not symbol or not entry_c:
+                continue
+            if symbol in self._positions:
+                continue
+            try:
+                df = await asyncio.wait_for(
+                    self._connector.fetch_ohlcv(symbol, tf, limit=150),
+                    timeout=12,
+                )
+                if len(df) < 50 or not evaluate_conditions(df, entry_c):
+                    continue
+                risk = cfg.get("risk", {})
+                extra.append({
+                    "symbol":           symbol,
+                    "score":            70,
+                    "rsi":              50.0,
+                    "price":            float(df["close"].iloc[-1]),
+                    "signals":          [f"DB전략 진입: {strat['name']}"],
+                    "strategy_type":    f"db_{strat['id']}",
+                    "strategy_label":   f"DB: {strat['name']}",
+                    "sl_pct":           risk.get("stop_loss_pct"),
+                    "tp_pct":           risk.get("take_profit_pct"),
+                    "style":            self.settings["trading_style"],
+                    "volume_ratio":     1.0,
+                    "price_change_pct": 0.0,
+                    "mtf_confirmed":    True,
+                    "mtf_trend":        "neutral",
+                })
+                logger.info(f"AutoBot DB전략 신호: [{strat['name']}] {symbol}")
+            except Exception as e:
+                logger.debug(f"AutoBot DB전략 평가 오류 {symbol}: {e}")
+
+        return extra
 
     async def run_scan_now(self):
         if self._scan_in_progress:
@@ -700,7 +799,12 @@ class AutoTradeBot:
                     candidate.get("volume_ratio", 0.0) >= 3.0
                     and candidate.get("price_change_pct", 0.0) >= 3.0
                 )
-                min_score_for_entry = 50 if is_surge else self.settings["min_score"]
+
+                # ── 멀티 타임프레임 확인 ─────────────────────────────────────
+                # 상위봉 bearish 추세 시 min_score +10 (급등 오버라이드 예외)
+                mtf_confirmed = candidate.get("mtf_confirmed", True)
+                mtf_penalty = 0 if (mtf_confirmed or is_surge) else 10
+                min_score_for_entry = (50 if is_surge else self.settings["min_score"]) + mtf_penalty
 
                 if candidate["score"] < min_score_for_entry:
                     continue
@@ -796,6 +900,21 @@ class AutoTradeBot:
                 price = ticker["last"]
 
             krw = self._broker.balance.get("KRW", 0)
+            total_invested = sum(
+                p["avg_price"] * p["total_amount"] for p in self._positions.values()
+            )
+            total_value = krw + total_invested
+
+            # ── 포트폴리오 리스크 체크 (일일 손실 한도 / 최대 노출) ──────
+            ok, reason = self._portfolio_risk.can_enter(
+                total_value_krw=total_value,
+                total_invested_krw=total_invested,
+                max_daily_loss_pct=self.settings.get("max_daily_loss_pct", 5.0),
+                max_exposure_pct=self.settings.get("max_portfolio_exposure_pct", 80.0),
+            )
+            if not ok:
+                logger.info(f"AutoBot: 진입 차단 [{symbol}] — {reason}")
+                return
             invest_krw = krw * self.settings["position_size_pct"] / 100 * min(size_multiplier, 1.3)
             if invest_krw < 5_000:
                 logger.warning(f"AutoBot: KRW 부족 ({krw:,.0f}), 진입 불가")
@@ -951,6 +1070,9 @@ class AutoTradeBot:
             pnl_krw = round((price - avg) * amount)
             exit_at = datetime.now(KST).isoformat()
 
+            # 일일 PnL 추적 (일일 손실 한도 체크용)
+            self._portfolio_risk.record_trade(pnl_krw)
+
             record = {
                 "symbol": symbol,
                 "avg_price": avg,
@@ -970,15 +1092,16 @@ class AutoTradeBot:
             if len(self._trade_log) > MAX_TRADE_LOG:
                 self._trade_log.pop()
 
-            # 전략 실적 업데이트
+            # 전략 실적 업데이트 (DB 전략 포함 동적 추적)
             st = pos.get("strategy_type", "standard")
-            perf = self._strategy_performance.get(st)
-            if perf is not None:
-                if pnl_pct > 0:
-                    perf["wins"] += 1
-                else:
-                    perf["losses"] += 1
-                perf["total_pnl"] = round(perf["total_pnl"] + pnl_pct, 2)
+            perf = self._strategy_performance.setdefault(
+                st, {"wins": 0, "losses": 0, "total_pnl": 0.0}
+            )
+            if pnl_pct > 0:
+                perf["wins"] += 1
+            else:
+                perf["losses"] += 1
+            perf["total_pnl"] = round(perf["total_pnl"] + pnl_pct, 2)
 
             # TODO 3: 연속 손절 카운터 + AI 자기 분석
             if reason == "stop_loss" and pnl_pct < 0:
@@ -1101,6 +1224,9 @@ class AutoTradeBot:
                 "total_pnl": perf["total_pnl"],
             }
 
+        # ── 성과 지표 계산 ────────────────────────────────────────────────
+        performance = calc_performance(logs)
+
         # 포지션에 트레일링 스탑 상태 보강
         for p in positions:
             if p.get("trailing_active") and p.get("highest_price"):
@@ -1135,6 +1261,10 @@ class AutoTradeBot:
             "ai_regime":          self._current_regime,
             "ai_consecutive_losses": self._consecutive_losses,
             "ai_analysis_log":    self._analysis_log[:10],
+            # 성과 지표 (Sharpe / Sortino / MDD / Expectancy 등)
+            "performance":        performance,
+            # 포트폴리오 리스크 현황
+            "daily_pnl_krw":      round(self._portfolio_risk.daily_pnl_krw),
         }
 
 
