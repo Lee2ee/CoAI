@@ -22,6 +22,16 @@ EXCHANGE_CLASSES = {
     # 확장 시 여기에 추가: "binance": ccxt.binance, etc.
 }
 
+# 거래소별 스팟 수수료율 (매수·매도 동일 적용)
+# 출처: 각 거래소 공식 수수료 정책 기준 (2025년)
+EXCHANGE_FEES: dict[str, float] = {
+    "upbit":   0.0005,   # 0.05%  — KRW 마켓 단일 수수료 (maker = taker)
+    "binance": 0.001,    # 0.10%  — 기본 (BNB 할인 미적용)
+    "bybit":   0.001,    # 0.10%  — 스팟 기본 (VIP0 taker 기준)
+    "bithumb": 0.0025,   # 0.25%  — KRW 마켓 기본 수수료
+    "coinone": 0.002,    # 0.20%  — KRW 마켓 taker 기준
+}
+
 TIMEFRAME_MAP = {
     "1m":  60_000,
     "3m":  180_000,
@@ -153,7 +163,7 @@ class PaperBroker:
     실제 거래소 시세 데이터를 기반으로 주문을 가상 체결.
     """
 
-    def __init__(self, initial_balance: float = 10_000.0, fee_rate: float = 0.001):
+    def __init__(self, initial_balance: float = 10_000.0, fee_rate: float = EXCHANGE_FEES["upbit"]):
         self.balance = {"USDT": initial_balance}
         self.fee_rate = fee_rate
         self.orders: list[dict] = []
