@@ -8,7 +8,7 @@ import {
 import api from '../../utils/api'
 import type {
   AutoBotStatus, AutoBotPosition, AutoBotTradeLog, ScanResult,
-  StylePreset, AutoBotTradeDB, AutoBotTradeStats, AiAnalysisLogEntry,
+  StylePreset, AutoBotTradeDB, AutoBotTradeStats, AiAnalysisLogEntry, PerformanceStats,
 } from '../../types'
 import PositionDetailModal from './PositionDetailModal'
 import clsx from 'clsx'
@@ -189,6 +189,17 @@ function SettingsModal({
                 value={form.min_score} onChange={v => set('min_score', v)} />
               <NumRow label="스캔 주기 (분)" min={1} max={1440}
                 value={form.scan_interval_min} onChange={v => set('scan_interval_min', v)} />
+            </div>
+          </div>
+
+          {/* 리스크 관리 */}
+          <div>
+            <p className="text-xs text-slate-400 font-medium mb-2">포트폴리오 리스크</p>
+            <div className="grid grid-cols-2 gap-3">
+              <NumRow label="일일 최대 손실 (%)" min={1} max={30} step={0.5}
+                value={form.max_daily_loss_pct ?? 5} onChange={v => set('max_daily_loss_pct', v)} />
+              <NumRow label="최대 투자 비중 (%)" min={10} max={100} step={5}
+                value={form.max_portfolio_exposure_pct ?? 80} onChange={v => set('max_portfolio_exposure_pct', v)} />
             </div>
           </div>
 
@@ -416,6 +427,8 @@ function PositionCard({ pos, onClick }: { pos: AutoBotPosition; onClick: () => v
 function ScanRow({ r, rank }: { r: ScanResult; rank: number }) {
   const c = r.score >= 70 ? 'text-up' : r.score >= 50 ? 'text-amber-400' : 'text-slate-400'
   const stratColor = STRATEGY_COLORS[r.strategy_type] ?? STRATEGY_COLORS.standard
+  const mtfLabel = r.mtf_trend === 'bullish' ? '↑HTF' : r.mtf_trend === 'bearish' ? '↓HTF' : null
+  const mtfColor = r.mtf_trend === 'bullish' ? 'text-up' : 'text-down'
   return (
     <div className="py-2 border-b border-surface-700 last:border-0 space-y-1">
       <div className="flex items-center gap-3">
@@ -424,6 +437,9 @@ function ScanRow({ r, rank }: { r: ScanResult; rank: number }) {
         <span className={clsx('text-xs px-1.5 py-0.5 rounded font-medium', stratColor)}>
           {r.strategy_label}
         </span>
+        {mtfLabel && (
+          <span className={clsx('text-xs font-bold', mtfColor)}>{mtfLabel}</span>
+        )}
         {r.sl_pct && (
           <span className="text-xs text-slate-500">
             SL <span className="text-down">{r.sl_pct}%</span>
@@ -570,7 +586,7 @@ export default function AutoTradePanel() {
   const qc = useQueryClient()
   const [showSettings, setShowSettings] = useState(false)
   const [selectedPos, setSelectedPos] = useState<AutoBotPosition | null>(null)
-  const [tab, setTab] = useState<'positions' | 'scan' | 'log' | 'ai'>('positions')
+  const [tab, setTab] = useState<'positions' | 'scan' | 'log' | 'ai' | 'perf'>('positions')
 
   const { data: status, isLoading } = useQuery<AutoBotStatus>({
     queryKey: ['auto-bot-status'],
@@ -783,6 +799,7 @@ export default function AutoTradePanel() {
           <span>손절 <b className="text-down">{status.settings.stop_loss_pct}%</b></span>
           <span>익절 <b className="text-up">{status.settings.take_profit_pct}%</b></span>
           <span>최대 <b className="text-slate-200">{status.settings.max_positions}개</b></span>
+          <span>일손실한도 <b className="text-amber-400">{status.settings.max_daily_loss_pct ?? 5}%</b></span>
           <span>물타기 <b className={status.settings.auto_avg_down ? 'text-amber-400' : 'text-slate-500'}>{status.settings.auto_avg_down ? `ON (${status.settings.avg_down_threshold_pct}%)` : 'OFF'}</b></span>
           <span>추매 <b className={status.settings.auto_add ? 'text-up' : 'text-slate-500'}>{status.settings.auto_add ? `ON (${status.settings.add_threshold_pct}%)` : 'OFF'}</b></span>
           {status.last_scan_at && <span className="ml-auto text-slate-500">마지막 스캔: {status.last_scan_at}</span>}
@@ -795,6 +812,7 @@ export default function AutoTradePanel() {
             ['scan', `스캔 결과 (${status.scan_results.length})`],
             ['log', `거래 내역 (${tradeStats?.total ?? status.total_trades})`],
             ['ai', `AI 활동 (${status.ai_analysis_log?.length ?? 0})`],
+            ['perf', '성과 분석'],
           ] as const).map(([key, label]) => (
             <button
               key={key}
@@ -851,6 +869,19 @@ export default function AutoTradePanel() {
             consecutiveLosses={status.ai_consecutive_losses}
             providerLabel={aiConfig ? `${aiConfig.providers?.[aiConfig.provider]?.label ?? aiConfig.provider} / ${aiConfig.model}` : undefined}
             providerTier={aiConfig ? (aiConfig.providers?.[aiConfig.provider]?.tier ?? 'free') : undefined}
+          />
+        )}
+
+        {tab === 'perf' && (
+          <PerformancePanel
+            perf={status.performance ?? {
+              sharpe_ratio: 0, sortino_ratio: 0, calmar_ratio: 0, profit_factor: 0,
+              expectancy_pct: 0, max_drawdown_pct: 0, avg_win_pct: 0, avg_loss_pct: 0,
+              win_rate: 0, best_trade_pct: 0, worst_trade_pct: 0, total_trades: 0,
+            }}
+            dailyPnlKrw={status.daily_pnl_krw ?? 0}
+            maxDailyLossPct={status.settings.max_daily_loss_pct ?? 5}
+            totalValueKrw={status.total_value_krw}
           />
         )}
 
@@ -1049,6 +1080,85 @@ function AiLogEntry({ entry }: { entry: AiAnalysisLogEntry }) {
   }
 
   return null
+}
+
+// ─── 성과 분석 패널 ─────────────────────────────────────────────────────────
+
+function PerfRow({ label, value, color, sub }: { label: string; value: string; color?: 'up' | 'down' | 'neutral'; sub?: string }) {
+  const vc = color === 'up' ? 'text-up' : color === 'down' ? 'text-down' : 'text-slate-200'
+  return (
+    <div className="flex items-center justify-between py-2 border-b border-surface-700 last:border-0 text-xs">
+      <span className="text-slate-400">{label}</span>
+      <div className="text-right">
+        <span className={`font-semibold tabular-nums ${vc}`}>{value}</span>
+        {sub && <span className="text-slate-500 ml-1.5">{sub}</span>}
+      </div>
+    </div>
+  )
+}
+
+function PerformancePanel({ perf, dailyPnlKrw, maxDailyLossPct, totalValueKrw }: {
+  perf: PerformanceStats
+  dailyPnlKrw: number
+  maxDailyLossPct: number
+  totalValueKrw: number
+}) {
+  const dailyLimitKrw = Math.round(totalValueKrw * maxDailyLossPct / 100)
+  const dailyUsedPct = dailyLimitKrw > 0 ? Math.min(100, Math.abs(Math.min(0, dailyPnlKrw)) / dailyLimitKrw * 100) : 0
+
+  if (perf.total_trades === 0) {
+    return <p className="text-sm text-slate-500 py-4 text-center">거래 내역이 없습니다.</p>
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* 일일 손실 한도 게이지 */}
+      <div className="bg-surface-700 rounded-lg p-3">
+        <div className="flex items-center justify-between text-xs mb-2">
+          <span className="text-slate-400">일일 손실 현황</span>
+          <span className={dailyPnlKrw < 0 ? 'text-down font-semibold' : 'text-up font-semibold'}>
+            {dailyPnlKrw >= 0 ? '+' : ''}{dailyPnlKrw.toLocaleString('ko-KR')} ₩
+            <span className="text-slate-500 font-normal ml-1">/ 한도 -{dailyLimitKrw.toLocaleString('ko-KR')} ₩</span>
+          </span>
+        </div>
+        <div className="w-full h-2 bg-surface-600 rounded-full overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all ${dailyUsedPct >= 80 ? 'bg-down' : dailyUsedPct >= 50 ? 'bg-amber-500' : 'bg-up'}`}
+            style={{ width: `${dailyUsedPct}%` }}
+          />
+        </div>
+      </div>
+
+      {/* 리스크 조정 수익 지표 */}
+      <div>
+        <p className="text-xs text-slate-500 mb-1 font-medium">리스크 조정 수익</p>
+        <PerfRow label="샤프 비율" value={perf.sharpe_ratio.toFixed(2)}
+          color={perf.sharpe_ratio >= 1 ? 'up' : perf.sharpe_ratio >= 0 ? 'neutral' : 'down'}
+          sub="(≥1 양호)" />
+        <PerfRow label="소르티노 비율" value={perf.sortino_ratio.toFixed(2)}
+          color={perf.sortino_ratio >= 1 ? 'up' : perf.sortino_ratio >= 0 ? 'neutral' : 'down'}
+          sub="(하방 리스크)" />
+        <PerfRow label="칼마 비율" value={perf.calmar_ratio.toFixed(2)}
+          color={perf.calmar_ratio >= 1 ? 'up' : perf.calmar_ratio >= 0 ? 'neutral' : 'down'}
+          sub="(수익/MDD)" />
+        <PerfRow label="프로핏 팩터" value={perf.profit_factor.toFixed(2)}
+          color={perf.profit_factor >= 1.5 ? 'up' : perf.profit_factor >= 1 ? 'neutral' : 'down'}
+          sub="(≥1.5 양호)" />
+      </div>
+
+      {/* 거래 통계 */}
+      <div>
+        <p className="text-xs text-slate-500 mb-1 font-medium">거래 통계</p>
+        <PerfRow label="기대값 (Expectancy)" value={`${perf.expectancy_pct >= 0 ? '+' : ''}${perf.expectancy_pct.toFixed(2)}%`}
+          color={perf.expectancy_pct >= 0 ? 'up' : 'down'} />
+        <PerfRow label="최대 낙폭 (MDD)" value={`-${perf.max_drawdown_pct.toFixed(2)}%`} color="down" />
+        <PerfRow label="평균 수익 거래" value={`+${perf.avg_win_pct.toFixed(2)}%`} color="up" />
+        <PerfRow label="평균 손실 거래" value={`${perf.avg_loss_pct.toFixed(2)}%`} color="down" />
+        <PerfRow label="최고 수익" value={`+${perf.best_trade_pct.toFixed(2)}%`} color="up" />
+        <PerfRow label="최대 손실" value={`${perf.worst_trade_pct.toFixed(2)}%`} color="down" />
+      </div>
+    </div>
+  )
 }
 
 function AiActivityLog({
