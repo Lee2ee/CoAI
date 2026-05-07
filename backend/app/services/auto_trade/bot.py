@@ -464,28 +464,18 @@ class AutoTradeBot:
             self._broker.balance[quote] = krw
             logger.info(f"AutoTradeBot: 모의거래 잔고 변경 → {krw:,.0f} {quote}")
 
-    # ── WebSocket 실시간 가격 모니터 ─────────────────────────────────────────
+    # ── 실시간 가격 모니터 ───────────────────────────────────────────────────
 
     async def _price_monitor_loop(self):
         """
-        업비트: WebSocket 체결가 스트림으로 실시간 SL/TP 감시.
-        Binance/Bybit: REST 폴링 (1초 간격)으로 가격 갱신.
-        연결 끊김 시 5초 대기 후 자동 재연결.
+        REST 폴링 기반 가격 모니터 (모든 거래소 공통, 1초 간격).
+        업비트 WebSocket 직접 연결은 환경에 따라 DNS 문제가 발생할 수 있어
+        안정성 우선으로 REST 방식으로 통합.
         """
-        if self.settings.get("exchange_id", "upbit") != "upbit":
-            await self._rest_price_monitor_loop()
-            return
-        while self._running:
-            try:
-                await self._ws_price_monitor()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning(f"AutoTradeBot WS: 재연결 대기 5s ({e})")
-                await asyncio.sleep(5)
+        await self._rest_price_monitor_loop()
 
     async def _rest_price_monitor_loop(self):
-        """Binance/Bybit용 REST 폴링 가격 모니터 (1초 간격)."""
+        """REST 폴링 가격 모니터 (모든 거래소 공통, 1초 간격)."""
         while self._running:
             try:
                 # 현물 포지션 업데이트
