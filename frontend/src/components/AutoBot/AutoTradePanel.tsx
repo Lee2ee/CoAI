@@ -303,29 +303,6 @@ function SettingsModal({
                     ))}
                   </div>
                 </div>
-                {/* 포지션 방향 */}
-                <div>
-                  <p className="text-xs text-slate-400 mb-1.5 flex items-center gap-1">
-                    포지션 방향
-                    <Tooltip text="롱 전용: 가격 상승 시 수익을 기대하는 매수 포지션만 진입합니다. 롱+숏: 상승 신호에 롱, 하락 신호에 숏 포지션을 자동으로 진입합니다. 공매도(숏)는 Binance·Bybit 선물에서만 지원됩니다." iconOnly />
-                  </p>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {([false, true] as const).map(short => (
-                      <button
-                        key={String(short)}
-                        onClick={() => set('enable_short', short)}
-                        className={clsx(
-                          'py-1.5 rounded text-xs font-medium border transition-colors',
-                          (form.enable_short ?? false) === short
-                            ? 'bg-brand-500/20 border-brand-500 text-brand-400'
-                            : 'bg-surface-700 border-surface-600 text-slate-400 hover:text-slate-200'
-                        )}
-                      >
-                        {short ? '롱 + 숏 (양방향)' : '롱 전용'}
-                      </button>
-                    ))}
-                  </div>
-                </div>
                 <p className="text-xs text-amber-400/80 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1.5">
                   레버리지가 높을수록 청산 위험이 증가합니다. 모의거래로 먼저 테스트하세요.
                 </p>
