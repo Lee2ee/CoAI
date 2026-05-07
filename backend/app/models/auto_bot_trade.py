@@ -1,3 +1,4 @@
+from typing import Optional
 from sqlalchemy import String, Integer, Float, JSON, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 from ..core.database import Base
@@ -24,3 +25,10 @@ class AutoBotTrade(Base):
     entry_at: Mapped[str] = mapped_column(String(50))
     exit_at: Mapped[str] = mapped_column(String(50), default="")
     is_paper: Mapped[bool] = mapped_column(Boolean, default=True)
+    # ── 선물 거래 전용 필드 ────────────────────────────────────────────────────
+    market_type: Mapped[str] = mapped_column(String(8),  default="spot")    # "spot" | "futures"
+    side: Mapped[str] = mapped_column(String(8),  default="long")           # "long" | "short"
+    leverage: Mapped[int] = mapped_column(Integer, default=1)
+    margin_mode: Mapped[str] = mapped_column(String(16), default="cross")   # "cross" | "isolated"
+    liquidation_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    funding_paid: Mapped[float] = mapped_column(Float, default=0.0)

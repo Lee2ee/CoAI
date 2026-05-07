@@ -1,3 +1,4 @@
+from typing import Optional
 from sqlalchemy import String, Boolean, DateTime
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -19,4 +20,7 @@ class User(Base):
     )
     strategies: Mapped[list["Strategy"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
+    )
+    ai_config: Mapped[Optional["UserAIConfig"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", uselist=False
     )

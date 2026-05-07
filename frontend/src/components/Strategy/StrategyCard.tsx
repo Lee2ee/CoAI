@@ -1,8 +1,10 @@
+import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Play, Pause, Trash2, TrendingUp, TrendingDown, BarChart2 } from 'lucide-react'
 import api from '../../utils/api'
 import type { Strategy } from '../../types'
 import clsx from 'clsx'
+import ConfirmModal from '../common/ConfirmModal'
 
 interface Props {
   strategy: Strategy
@@ -11,6 +13,7 @@ interface Props {
 
 export default function StrategyCard({ strategy, onBacktest }: Props) {
   const qc = useQueryClient()
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
 
   const toggleMutation = useMutation({
     mutationFn: (is_active: boolean) =>
@@ -26,6 +29,17 @@ export default function StrategyCard({ strategy, onBacktest }: Props) {
   const pnlPositive = strategy.total_pnl_pct >= 0
 
   return (
+    <>
+    {showDeleteConfirm && (
+      <ConfirmModal
+        message={`'${strategy.name}' 전략을 삭제하시겠습니까?`}
+        detail="삭제 후에는 복구할 수 없습니다."
+        confirmText="삭제"
+        variant="danger"
+        onConfirm={() => deleteMutation.mutate()}
+        onClose={() => setShowDeleteConfirm(false)}
+      />
+    )}
     <div className="card hover:border-surface-600 transition-colors">
       <div className="flex items-start justify-between mb-3">
         <div>
@@ -67,9 +81,7 @@ export default function StrategyCard({ strategy, onBacktest }: Props) {
             {strategy.is_active ? <Pause size={16} /> : <Play size={16} />}
           </button>
           <button
-            onClick={() => {
-              if (confirm('전략을 삭제하시겠습니까?')) deleteMutation.mutate()
-            }}
+            onClick={() => setShowDeleteConfirm(true)}
             className="p-1.5 text-slate-400 hover:text-down transition-colors"
           >
             <Trash2 size={16} />
@@ -101,6 +113,7 @@ export default function StrategyCard({ strategy, onBacktest }: Props) {
         <span>샤프 {strategy.sharpe_ratio.toFixed(2)}</span>
       </div>
     </div>
+    </>
   )
 }
 

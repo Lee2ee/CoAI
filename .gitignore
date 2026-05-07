@@ -26,6 +26,15 @@ ENV/
 .env.*.local
 backend/.env
 
+# AI provider settings (contains API keys)
+backend/ai_settings.json
+
+# Claude Code internal files
+.claude/
+
+# Project internal planning docs
+prompt.md
+
 # Database (contains real trade data and user credentials)
 *.db
 *.sqlite
