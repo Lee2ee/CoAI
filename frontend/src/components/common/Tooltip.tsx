@@ -15,25 +15,33 @@ interface TooltipProps {
  * - iconOnly=true 시 ? 아이콘만 렌더링
  */
 export default function Tooltip({ text, children, iconOnly = false, className }: TooltipProps) {
-  const [visible, setVisible] = useState(false)
-  const [pos, setPos] = useState<'top' | 'bottom'>('top')
+  const [pos, setPos] = useState<{ x: number; y: number; dir: 'top' | 'bottom' } | null>(null)
   const ref = useRef<HTMLSpanElement>(null)
 
   const show = () => {
     if (ref.current) {
       const rect = ref.current.getBoundingClientRect()
-      setPos(rect.top < 120 ? 'bottom' : 'top')
+      const dir = rect.top < 120 ? 'bottom' : 'top'
+      setPos({
+        x: rect.left + rect.width / 2,
+        y: dir === 'top' ? rect.top : rect.bottom,
+        dir,
+      })
     }
-    setVisible(true)
   }
 
-  const tooltipClass =
-    pos === 'top'
-      ? 'bottom-full mb-2 left-1/2 -translate-x-1/2'
-      : 'top-full mt-2 left-1/2 -translate-x-1/2'
+  const tooltipStyle: React.CSSProperties = pos
+    ? {
+        position: 'fixed',
+        left: pos.x,
+        ...(pos.dir === 'top' ? { bottom: window.innerHeight - pos.y + 8 } : { top: pos.y + 8 }),
+        transform: 'translateX(-50%)',
+        zIndex: 9999,
+      }
+    : {}
 
   const arrowClass =
-    pos === 'top'
+    pos?.dir === 'top'
       ? 'top-full left-1/2 -translate-x-1/2 border-t-surface-700'
       : 'bottom-full left-1/2 -translate-x-1/2 border-b-surface-700'
 
@@ -42,7 +50,7 @@ export default function Tooltip({ text, children, iconOnly = false, className }:
       ref={ref}
       className={`relative inline-flex items-center gap-0.5 ${className ?? ''}`}
       onMouseEnter={show}
-      onMouseLeave={() => setVisible(false)}
+      onMouseLeave={() => setPos(null)}
     >
       {iconOnly ? (
         <HelpCircle size={12} className="text-slate-500 hover:text-slate-300 cursor-help flex-shrink-0" />
@@ -50,9 +58,10 @@ export default function Tooltip({ text, children, iconOnly = false, className }:
         <span className="cursor-help">{children}</span>
       )}
 
-      {visible && (
+      {pos && (
         <span
-          className={`absolute z-[999] w-56 text-xs bg-surface-900 border border-surface-700 text-slate-300 rounded-lg px-3 py-2 shadow-2xl pointer-events-none leading-relaxed whitespace-normal ${tooltipClass}`}
+          style={tooltipStyle}
+          className="w-56 text-xs bg-surface-900 border border-surface-700 text-slate-300 rounded-lg px-3 py-2 shadow-2xl pointer-events-none leading-relaxed whitespace-normal"
         >
           {text}
           <span
