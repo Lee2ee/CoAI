@@ -89,8 +89,10 @@ async def _call_groq(system: str, user_msg: str, cfg: dict) -> str:
             json=payload,
             headers={"Authorization": f"Bearer {api_key}"},
         )
+        if res.status_code == 429:
+            raise HTTPException(status_code=429, detail="Groq API 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.")
         if res.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Groq API 오류: {res.text[:200]}")
+            raise HTTPException(status_code=502, detail=f"Groq API 오류 ({res.status_code}): {res.text[:200]}")
     return res.json()["choices"][0]["message"]["content"]
 
 
@@ -110,8 +112,10 @@ async def _call_anthropic(system: str, user_msg: str, cfg: dict) -> str:
             json=payload,
             headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
         )
+        if res.status_code == 429:
+            raise HTTPException(status_code=429, detail="Claude API 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.")
         if res.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Claude API 오류: {res.text[:200]}")
+            raise HTTPException(status_code=502, detail=f"Claude API 오류 ({res.status_code}): {res.text[:200]}")
     return res.json()["content"][0]["text"]
 
 
@@ -134,8 +138,10 @@ async def _call_openai(system: str, user_msg: str, cfg: dict) -> str:
             json=payload,
             headers={"Authorization": f"Bearer {api_key}"},
         )
+        if res.status_code == 429:
+            raise HTTPException(status_code=429, detail="OpenAI API 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.")
         if res.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"OpenAI API 오류: {res.text[:200]}")
+            raise HTTPException(status_code=502, detail=f"OpenAI API 오류 ({res.status_code}): {res.text[:200]}")
     return res.json()["choices"][0]["message"]["content"]
 
 
@@ -153,8 +159,12 @@ async def _call_gemini(system: str, user_msg: str, cfg: dict) -> str:
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
             json=payload,
         )
+        if res.status_code == 429:
+            raise HTTPException(status_code=429, detail="Gemini API 무료 할당량을 초과했습니다. 잠시 후 다시 시도하거나, Google AI Studio에서 플랜을 확인하세요.")
+        if res.status_code == 401 or res.status_code == 403:
+            raise HTTPException(status_code=502, detail="Gemini API 키가 유효하지 않습니다. 설정 메뉴에서 키를 확인하세요.")
         if res.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Gemini API 오류: {res.text[:200]}")
+            raise HTTPException(status_code=502, detail=f"Gemini API 오류 ({res.status_code}): {res.text[:200]}")
     return res.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
@@ -237,13 +247,8 @@ Analyze market data and return ONLY a valid JSON object with this exact structur
   "symbol": "{{SYMBOL}}",
   "timeframe": "{{TIMEFRAME}}",
   "exchange": "upbit",
-  "entry_conditions": [
-    {"id": "e1", "indicator": "RSI", "params": {"length": 14}, "operator": "<", "value": 35},
-    {"id": "e2", "indicator": "EMA_CROSS", "params": {"fast": 9, "slow": 21}, "operator": "cross_above"}
-  ],
-  "exit_conditions": [
-    {"id": "x1", "indicator": "RSI", "params": {"length": 14}, "operator": ">", "value": 65}
-  ],
+  "entry_conditions": [...],
+  "exit_conditions": [...],
   "risk": {
     "stop_loss_pct": 2.0,
     "take_profit_pct": 5.0,
@@ -252,23 +257,41 @@ Analyze market data and return ONLY a valid JSON object with this exact structur
   }
 }
 
-Rules:
-- Indicators: RSI, EMA, SMA, MACD, BB, STOCH, ATR, EMA_CROSS
-- Operators: <, >, <=, >=, ==, cross_above, cross_below
-- EMA_CROSS: no "value" field needed
-- MACD value=0 means crossing zero line
-- 2-4 entry conditions, 1-3 exit conditions
-- stop_loss_pct: 1.5-4.0, take_profit_pct: 2x-4x stop loss
-- Be conservative with risk"""
+Indicators available: RSI, EMA, SMA, MACD, BB_UPPER, BB_LOWER, STOCH, EMA_CROSS
+Operators: <, >, <=, >=, cross_above, cross_below
+
+CRITICAL RULES — violations will cause 0 trades:
+
+1. NEVER mix cross_above/cross_below with other conditions in the same entry/exit list.
+   - WRONG: [RSI < 35, EMA_CROSS cross_above]   ← almost never fires simultaneously
+   - RIGHT (cross only): [EMA_CROSS cross_above]
+   - RIGHT (state only): [RSI < 35, STOCH < 25]
+
+2. cross_above/cross_below indicators: EMA_CROSS, MACD, BB_UPPER, BB_LOWER
+   - EMA_CROSS: no "value" field. Example: {"indicator":"EMA_CROSS","params":{"fast":9,"slow":21},"operator":"cross_above"}
+   - MACD: value=0. Example: {"indicator":"MACD","params":{"fast":12,"slow":26,"signal":9},"operator":"cross_above","value":0}
+   - BB_LOWER cross_above: price crossed above lower band (no value needed, omit or set 0)
+
+3. State-based conditions (<, >, <=, >=): RSI, EMA, SMA, STOCH, BB_UPPER, BB_LOWER
+   - When using multiple conditions, ALL must use state operators only (1-3 conditions)
+   - EMA/SMA: compare against a price level value (e.g., EMA > 50000 means price-level EMA > 50000)
+
+4. Keep it simple: prefer 1-2 entry conditions that realistically fire together.
+
+5. stop_loss_pct: 1.5-4.0, take_profit_pct: 2x-3x stop_loss_pct, position_size_pct: 3-10
+
+Examples of VALID strategies:
+- Cross-based: entry=[EMA_CROSS cross_above], exit=[EMA_CROSS cross_below]
+- State-based: entry=[RSI<=30, STOCH<=25], exit=[RSI>=65]
+- Single condition: entry=[MACD cross_above value=0], exit=[MACD cross_below value=0]"""
 
 
-# 지원 심볼 목록 (scanner.py SCAN_SYMBOLS와 동일하게 유지)
-SUPPORTED_SYMBOLS = [
+# 동적 심볼 조회 실패 시 fallback 목록
+_FALLBACK_SYMBOLS = [
     "BTC/KRW", "ETH/KRW", "XRP/KRW", "SOL/KRW", "DOGE/KRW",
     "ADA/KRW", "AVAX/KRW", "LINK/KRW", "DOT/KRW", "ATOM/KRW",
     "MATIC/KRW", "LTC/KRW", "BCH/KRW", "ETC/KRW", "TRX/KRW",
     "NEAR/KRW", "APT/KRW", "OP/KRW", "SUI/KRW", "SEI/KRW",
-    "SAND/KRW", "MANA/KRW", "ALGO/KRW", "HBAR/KRW", "VET/KRW",
 ]
 
 
@@ -299,8 +322,19 @@ async def get_provider(
 
 @router.get("/symbols")
 async def get_symbols(user: User = Depends(get_current_user)):
-    """AI 전략 생성 지원 심볼 목록"""
-    return {"symbols": SUPPORTED_SYMBOLS}
+    """AI 전략 생성 지원 심볼 목록 - 업비트 전체 KRW 종목 동적 조회"""
+    connector = ExchangeConnector(exchange_id="upbit", is_paper=True)
+    try:
+        markets = await asyncio.wait_for(connector._exchange.load_markets(), timeout=15)
+        await connector.close()
+        symbols = sorted([
+            s for s in markets.keys()
+            if s.endswith("/KRW") and markets[s].get("active", True)
+        ])
+        return {"symbols": symbols}
+    except Exception:
+        await connector.close()
+        return {"symbols": _FALLBACK_SYMBOLS}
 
 
 @router.post("/generate")
@@ -309,15 +343,10 @@ async def generate_strategy(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    # 심볼 정규화 및 검증
+    # 심볼 정규화
     symbol = req.symbol.upper().strip()
     if "/" not in symbol:
         symbol = f"{symbol}/KRW"
-    if symbol not in SUPPORTED_SYMBOLS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"지원하지 않는 심볼입니다: {symbol}. 지원 목록: {', '.join(SUPPORTED_SYMBOLS[:5])} 등"
-        )
 
     # 시장 데이터 수집
     connector = ExchangeConnector(exchange_id=req.exchange, is_paper=True)

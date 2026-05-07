@@ -162,6 +162,32 @@ def calc_futures_position_size(
     return round(min(invest, max_invest), 4)
 
 
+def calc_kelly_fraction(
+    win_rate: float,
+    avg_win: float,
+    avg_loss: float,
+    max_fraction: float = 0.25,
+) -> float:
+    """
+    Half-Kelly Criterion 기반 투자 비중 계산.
+
+    Kelly fraction = win_rate - (1 - win_rate) / (avg_win / avg_loss)
+    안전을 위해 Half-Kelly (÷2) 적용.
+    음수 → 0, max_fraction 초과 → max_fraction 반환.
+
+    Args:
+        win_rate: 승률 (0.0~1.0)
+        avg_win:  평균 수익률 (소수, e.g. 0.03 = 3%)
+        avg_loss: 평균 손실률 절댓값 (소수, e.g. 0.015 = 1.5%)
+        max_fraction: 상한선 (기본 25%)
+    """
+    if avg_win <= 0 or avg_loss <= 0:
+        return 0.0
+    kelly = win_rate - (1 - win_rate) / (avg_win / avg_loss)
+    half_kelly = kelly / 2
+    return max(0.0, min(half_kelly, max_fraction))
+
+
 def calc_performance(trade_log: list[dict], initial_capital: float = 1_000_000) -> dict:
     """
     거래 로그로 주요 성과 지표 계산.

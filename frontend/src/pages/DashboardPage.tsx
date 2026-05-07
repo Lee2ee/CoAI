@@ -1,6 +1,6 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Bot, TrendingUp, TrendingDown, Wallet, Sparkles, ChevronDown, ChevronUp, PenLine } from 'lucide-react'
+import { Plus, Bot, TrendingUp, TrendingDown, Wallet, Sparkles, ChevronDown, ChevronUp, PenLine, Search } from 'lucide-react'
 import TradingChart from '../components/Chart/TradingChart'
 import StrategyCard from '../components/Strategy/StrategyCard'
 import StrategyForm from '../components/Strategy/StrategyForm'
@@ -9,7 +9,7 @@ import Modal from '../components/common/Modal'
 import BacktestPage from './BacktestPage'
 import api from '../utils/api'
 import { useSettingsStore } from '../store/settings'
-import type { Strategy, BotState, Portfolio } from '../types'
+import type { Strategy, BotState, Portfolio, Trade } from '../types'
 import clsx from 'clsx'
 
 // ─── 포트폴리오 요약 ────────────────────────────────────────────────────────
@@ -93,6 +93,110 @@ function PortfolioSummary({ stats, strategies }: {
         </div>
         <p className="text-xl font-bold text-slate-100">{activeBots}</p>
         <p className="text-xs text-slate-500 mt-0.5">전략 {strategies.length}개 중</p>
+      </div>
+    </div>
+  )
+}
+
+// ─── 전략 실행 상세 모달 ────────────────────────────────────────────────────
+
+function StrategyDetailModal({ strategy }: { strategy: Strategy }) {
+  const symbol = strategy.config.symbol
+  const [chartSymbol, setChartSymbol] = useState(symbol)
+
+  const { data: state, } = useQuery({
+    queryKey: ['strategy-state', strategy.id],
+    queryFn: async () => {
+      const res = await api.get(`/strategies/${strategy.id}/state`)
+      return res.data as { position: { symbol: string; direction: string; entry_price: number; amount: number; stop_loss_price: number; take_profit_price: number; unrealized_pnl: number; unrealized_pnl_pct: number; entry_at: string } | null }
+    },
+    refetchInterval: 5000,
+  })
+
+  const { data: trades = [] } = useQuery<Trade[]>({
+    queryKey: ['strategy-trades', strategy.id],
+    queryFn: async () => {
+      const res = await api.get(`/trades/?strategy_id=${strategy.id}&limit=20`)
+      return res.data as Trade[]
+    },
+    refetchInterval: 10000,
+  })
+
+  const pos = state?.position
+
+  return (
+    <div className="space-y-4">
+      {/* 차트 */}
+      <TradingChart symbol={chartSymbol} onSymbolChange={setChartSymbol} />
+
+      {/* 현재 포지션 */}
+      <div>
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">현재 포지션</h3>
+        {pos ? (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <div className="bg-surface-700 rounded-lg p-3">
+              <p className="text-xs text-slate-400">진입가</p>
+              <p className="text-sm font-semibold text-slate-100 mt-0.5">{pos.entry_price.toLocaleString()}</p>
+            </div>
+            <div className="bg-surface-700 rounded-lg p-3">
+              <p className="text-xs text-slate-400">수량</p>
+              <p className="text-sm font-semibold text-slate-100 mt-0.5">{pos.amount.toFixed(6)}</p>
+            </div>
+            <div className="bg-surface-700 rounded-lg p-3">
+              <p className="text-xs text-slate-400">미실현 손익</p>
+              <p className={clsx('text-sm font-semibold mt-0.5', pos.unrealized_pnl_pct >= 0 ? 'text-up' : 'text-down')}>
+                {pos.unrealized_pnl_pct >= 0 ? '+' : ''}{pos.unrealized_pnl_pct.toFixed(2)}%
+              </p>
+            </div>
+            <div className="bg-surface-700 rounded-lg p-3">
+              <p className="text-xs text-slate-400">손절 / 익절</p>
+              <p className="text-xs text-slate-100 mt-0.5">
+                <span className="text-down">{pos.stop_loss_price.toLocaleString()}</span>
+                {' / '}
+                <span className="text-up">{pos.take_profit_price.toLocaleString()}</span>
+              </p>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-slate-500 bg-surface-700 rounded-lg px-4 py-3">포지션 없음</p>
+        )}
+      </div>
+
+      {/* 거래 내역 */}
+      <div>
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">최근 거래</h3>
+        {trades.length === 0 ? (
+          <p className="text-sm text-slate-500 bg-surface-700 rounded-lg px-4 py-3">거래 내역 없음</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-slate-500 border-b border-surface-700">
+                  <th className="text-left pb-2 font-normal">진입</th>
+                  <th className="text-left pb-2 font-normal">청산</th>
+                  <th className="text-right pb-2 font-normal">진입가</th>
+                  <th className="text-right pb-2 font-normal">청산가</th>
+                  <th className="text-right pb-2 font-normal">손익</th>
+                  <th className="text-right pb-2 font-normal">사유</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-surface-700">
+                {trades.map(t => (
+                  <tr key={t.id} className="text-slate-300">
+                    <td className="py-2 pr-3">{new Date(t.entry_at).toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</td>
+                    <td className="py-2 pr-3">{new Date(t.exit_at).toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</td>
+                    <td className="py-2 pr-3 text-right">{t.entry_price.toLocaleString()}</td>
+                    <td className="py-2 pr-3 text-right">{t.exit_price.toLocaleString()}</td>
+                    <td className={clsx('py-2 pr-3 text-right font-semibold', t.pnl_pct >= 0 ? 'text-up' : 'text-down')}>
+                      {t.pnl_pct >= 0 ? '+' : ''}{t.pnl_pct.toFixed(2)}%
+                    </td>
+                    <td className="py-2 text-right text-slate-400">{t.exit_reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -202,25 +306,38 @@ function BotCard({ bot }: { bot: BotState }) {
 
 // ─── AI 자동 전략 생성 ───────────────────────────────────────────────────────
 
-// scanner.py SCAN_SYMBOLS와 동일하게 유지
-const SCAN_SYMBOLS = [
-  'BTC/KRW', 'ETH/KRW', 'XRP/KRW', 'SOL/KRW', 'DOGE/KRW',
-  'ADA/KRW', 'AVAX/KRW', 'LINK/KRW', 'DOT/KRW', 'ATOM/KRW',
-  'MATIC/KRW', 'LTC/KRW', 'BCH/KRW', 'ETC/KRW', 'TRX/KRW',
-  'NEAR/KRW', 'APT/KRW', 'OP/KRW', 'SUI/KRW', 'SEI/KRW',
-  'SAND/KRW', 'MANA/KRW', 'ALGO/KRW', 'HBAR/KRW', 'VET/KRW',
-]
-
 function AutoStrategyModal({ onClose, symbol }: { onClose: () => void; symbol: string }) {
   const qc = useQueryClient()
-  // 현재 선택 심볼이 지원 목록에 있으면 사용, 없으면 BTC/KRW
-  const [reqSymbol, setReqSymbol] = useState(
-    SCAN_SYMBOLS.includes(symbol) ? symbol : 'BTC/KRW'
-  )
+  const [reqSymbol, setReqSymbol] = useState(symbol || 'BTC/KRW')
   const [timeframe, setTimeframe] = useState('1h')
   const [result, setResult] = useState<{ strategy_id: number; name: string; config: unknown; market_summary: string } | null>(null)
+  const [symbolSearch, setSymbolSearch] = useState('')
+  const [symbolOpen, setSymbolOpen] = useState(false)
+  const symbolRef = useRef<HTMLDivElement>(null)
 
   const TIMEFRAMES = ['15m', '1h', '4h', '1d']
+
+  const { data: allSymbols = [] } = useQuery<string[]>({
+    queryKey: ['auto-strategy-symbols'],
+    queryFn: async () => {
+      const res = await api.get('/auto-strategy/symbols')
+      return res.data.symbols as string[]
+    },
+    staleTime: 5 * 60_000,
+  })
+
+  const filteredSymbols = useMemo(() => {
+    const q = symbolSearch.toUpperCase()
+    return q ? allSymbols.filter(s => s.includes(q)) : allSymbols
+  }, [allSymbols, symbolSearch])
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (symbolRef.current && !symbolRef.current.contains(e.target as Node)) setSymbolOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -235,9 +352,14 @@ function AutoStrategyModal({ onClose, symbol }: { onClose: () => void; symbol: s
     },
   })
 
-  const errMsg = mutation.isError
-    ? ((mutation.error as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? 'AI 분석 실패')
-    : null
+  const errMsg = (() => {
+    if (!mutation.isError) return null
+    const err = mutation.error as { response?: { status?: number; data?: { detail?: string } } }
+    const detail = err.response?.data?.detail
+    if (detail) return detail
+    if (err.response?.status === 429) return 'API 요청 한도를 초과했습니다. 1~2분 후 다시 시도하세요.'
+    return 'AI 분석 실패'
+  })()
 
   return (
     <div className="space-y-4">
@@ -248,17 +370,47 @@ function AutoStrategyModal({ onClose, symbol }: { onClose: () => void; symbol: s
           </p>
 
           <div className="grid grid-cols-2 gap-3">
-            <div>
+            <div ref={symbolRef} className="relative">
               <label className="text-xs text-slate-400 mb-1 block">종목 선택</label>
-              <select
-                className="input"
-                value={reqSymbol}
-                onChange={e => setReqSymbol(e.target.value)}
+              <button
+                type="button"
+                onClick={() => setSymbolOpen(!symbolOpen)}
+                className="input w-full flex items-center justify-between text-left"
               >
-                {SCAN_SYMBOLS.map(s => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
+                <span>{reqSymbol}</span>
+                <ChevronDown size={14} className="text-slate-400 flex-shrink-0" />
+              </button>
+              {symbolOpen && (
+                <div className="absolute z-50 mt-1 w-full bg-surface-800 border border-surface-600 rounded-lg shadow-xl overflow-hidden">
+                  <div className="p-2 border-b border-surface-700">
+                    <div className="flex items-center gap-2 bg-surface-700 rounded px-2">
+                      <Search size={13} className="text-slate-400" />
+                      <input
+                        autoFocus
+                        className="bg-transparent text-sm text-slate-200 placeholder-slate-500 py-1.5 flex-1 outline-none"
+                        placeholder="종목 검색..."
+                        value={symbolSearch}
+                        onChange={e => setSymbolSearch(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <div className="max-h-48 overflow-y-auto">
+                    {filteredSymbols.slice(0, 100).map(s => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => { setReqSymbol(s); setSymbolOpen(false); setSymbolSearch('') }}
+                        className={`w-full text-left px-3 py-2 text-sm hover:bg-surface-700 transition-colors ${s === reqSymbol ? 'text-brand-400 bg-brand-500/10' : 'text-slate-300'}`}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                    {filteredSymbols.length === 0 && (
+                      <p className="text-xs text-slate-500 px-3 py-3">검색 결과 없음</p>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
             <div>
               <label className="text-xs text-slate-400 mb-1 block">타임프레임</label>
@@ -286,8 +438,11 @@ function AutoStrategyModal({ onClose, symbol }: { onClose: () => void; symbol: s
           </div>
 
           {errMsg && (
-            <div className="bg-down/10 border border-down/30 rounded-lg px-3 py-2">
+            <div className="bg-down/10 border border-down/30 rounded-lg px-3 py-2 space-y-1">
               <p className="text-sm text-down">{errMsg}</p>
+              {(mutation.error as { response?: { status?: number } })?.response?.status === 429 && (
+                <p className="text-xs text-slate-400">Gemini 무료 플랜: 분당 15회 · 일 1,500회 제한. 모델을 <b>gemini-2.0-flash</b>로 설정했는지 확인하세요.</p>
+              )}
             </div>
           )}
 
@@ -405,6 +560,7 @@ export default function DashboardPage() {
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [showAutoModal, setShowAutoModal] = useState(false)
   const [backtestStrategy, setBacktestStrategy] = useState<Strategy | null>(null)
+  const [detailStrategy, setDetailStrategy] = useState<Strategy | null>(null)
   const [selectedSymbol, setSelectedSymbol] = useState('BTC/KRW')
 
   const { data: strategies = [], isLoading } = useQuery({
@@ -464,6 +620,7 @@ export default function DashboardPage() {
                   setSelectedSymbol(s.config.symbol)
                   setBacktestStrategy(s)
                 }}
+                onDetail={() => setDetailStrategy(s)}
               />
             ))}
           </div>
@@ -475,7 +632,7 @@ export default function DashboardPage() {
 
       {/* 모달: AI 전략 생성 */}
       {showAutoModal && (
-        <Modal title="AI 전략 자동 생성" onClose={() => setShowAutoModal(false)}>
+        <Modal title="AI 전략 자동 생성" onClose={() => setShowAutoModal(false)} overflowVisible>
           <AutoStrategyModal onClose={() => setShowAutoModal(false)} symbol={selectedSymbol} />
         </Modal>
       )}
@@ -484,6 +641,17 @@ export default function DashboardPage() {
       {showCreateModal && (
         <Modal title="새 전략 만들기" onClose={() => setShowCreateModal(false)} wide>
           <StrategyForm onClose={() => setShowCreateModal(false)} />
+        </Modal>
+      )}
+
+      {/* 모달: 전략 실행 상세 */}
+      {detailStrategy && (
+        <Modal
+          title={`${detailStrategy.name} — 실행 현황`}
+          onClose={() => setDetailStrategy(null)}
+          wide
+        >
+          <StrategyDetailModal strategy={detailStrategy} />
         </Modal>
       )}
 

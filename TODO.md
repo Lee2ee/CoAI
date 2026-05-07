@@ -23,7 +23,6 @@
 | 고급 캔들 패턴 (삼병사·역H&S·이중바닥·볼린저 반등) | [x] | `scanner.py:_detect_advanced_patterns()` |
 | 동적 종목 발굴 (전체 업비트 스캔, 30분 캐시) | [x] | `scanner.py:_fetch_dynamic_symbols()` |
 | 자가 학습 전략 최적화 | [ ] | → **TODO 7** |
-| 다중 거래소 지원 (Binance, Bybit) | [x] | `connector.py`, `scanner.py`, `bot.py` |
 
 ### 포지션 (Position)
 
@@ -36,8 +35,8 @@
 | 신호 약화 시 SL 자동 상향 (pnl ≥ protect_pct*2) | [x] | `bot.py:AutoTradeBot` |
 | 포트폴리오 최대 노출 한도 (총 자산 80%) | [x] | `risk/manager.py:RiskManager` |
 | 포트폴리오 상관관계 체크 | [ ] | → **TODO 10** |
-| 포지션 비중 동적 조절 (Kelly Criterion) | [ ] | → **TODO 11** |
-| 피라미딩 (수익 구간 단계별 추가 진입) | [ ] | → **TODO 12** |
+| 포지션 비중 동적 조절 (Kelly Criterion) | [x] | `risk/manager.py:calc_kelly_fraction()`, `bot.py:_open_position()` |
+| 피라미딩 (수익 구간 단계별 추가 진입) | [x] | `bot.py:_check_pyramid_entry()`, `_pyramid_into_position()` |
 
 ### 리스크 관리 (Risk Management)
 
@@ -194,35 +193,6 @@ async def optimize_weights(db, min_samples: int = 10) -> dict:
 - [ ] `signal_performance` 테이블이 청산마다 upsert됨
 - [ ] `optimize_weights()` 가 10건 누적 시 호출되고 결과가 로그에 출력됨
 - [ ] 가중치 조정 후 다음 `_score()` 호출에 반영됨
-
----
-
-## [ ] TODO 9. 다중 거래소 지원
-
-**수정 파일**
-- `backend/app/services/exchange/connector.py` — 거래소별 분기 처리
-- `backend/app/models/exchange_account.py` — `exchange` 필드 확인 (이미 존재 예상)
-- `backend/app/api/exchange_accounts.py` — Binance/Bybit 계정 등록 UI 지원
-
-**구현 내용**
-
-`connector.py` 의 `ExchangeConnector.__init__()` 에서 `exchange` 파라미터로 분기:
-```python
-if self.exchange == "upbit":
-    self.client = pyupbit.Upbit(access, secret)
-elif self.exchange in ("binance", "bybit"):
-    import ccxt
-    self.client = ccxt.binance({"apiKey": access, "secret": secret})
-    # 또는 ccxt.bybit(...)
-```
-
-공통 인터페이스 메서드 유지: `get_balance()`, `buy_market()`, `sell_market()`, `get_ohlcv()`
-각 거래소 응답 포맷 → 내부 표준 포맷으로 정규화하는 어댑터 함수 작성.
-
-**완료 기준**
-- [ ] Binance 계정으로 `get_balance()` 호출 성공
-- [ ] Binance `get_ohlcv("BTC/USDT", "1h")` 가 upbit와 동일한 DataFrame 구조 반환
-- [ ] 봇 시작 시 거래소 종류에 따라 자동으로 커넥터 선택
 
 ---
 

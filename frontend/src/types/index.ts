@@ -103,6 +103,7 @@ export interface BacktestResult {
   timestamps: string[]
   trades: BacktestTrade[]
   walk_forward_results?: WalkForwardResult[]
+  indicator_snapshot?: { label: string; current_value: number | string; operator: string; threshold: number | null }[]
 }
 
 export interface BacktestTrade {
@@ -162,7 +163,7 @@ export interface PositionEntry {
   price: number
   amount: number
   at: string
-  type: 'initial' | 'avg_down' | 'add'
+  type: 'initial' | 'avg_down' | 'add' | 'pyramid'
 }
 
 export interface AutoBotPosition {
@@ -184,6 +185,7 @@ export interface AutoBotPosition {
   position_style_label: string
   avg_down_count: number
   add_count: number
+  pyramid_count: number
 }
 
 export interface AutoBotTradeLog {
@@ -239,6 +241,10 @@ export interface AutoBotSettings {
   ai_exit_assist: boolean
   max_daily_loss_pct: number
   max_portfolio_exposure_pct: number
+  // 피라미딩
+  pyramid_enabled?: boolean
+  pyramid_threshold_pct?: number
+  max_pyramid?: number
   // 선물 설정
   market_type?: 'spot' | 'futures'
   leverage?: number

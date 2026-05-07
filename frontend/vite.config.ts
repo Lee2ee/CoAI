@@ -1,5 +1,13 @@
-import { defineConfig, loadEnv } from 'vite'
+import { defineConfig, loadEnv, createLogger } from 'vite'
 import react from '@vitejs/plugin-react'
+
+// WS 프록시 ECONNRESET 노이즈 제거 (백엔드 재시작 시 정상 발생)
+const logger = createLogger()
+const _warn = logger.warn.bind(logger)
+logger.warn = (msg, opts) => {
+  if (msg.includes('ws proxy socket error') || msg.includes('ECONNRESET')) return
+  _warn(msg, opts)
+}
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
@@ -8,6 +16,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    customLogger: logger,
     server: {
       port: frontendPort,
       proxy: {
@@ -23,6 +32,9 @@ export default defineConfig(({ mode }) => {
             proxy.on('error', () => {})
             proxy.on('proxyReqWs', (_proxyReq, _req, socket) => {
               socket.on('error', () => {})
+            })
+            proxy.on('open', (proxySocket) => {
+              proxySocket.on('error', () => {})
             })
           },
         },

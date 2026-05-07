@@ -51,3 +51,5 @@ class BacktestResponse(BaseModel):
     timestamps: list[str]
     trades: list[BacktestTradeResult]
     walk_forward_results: Optional[list[dict]] = None
+    # 거래 0건 진단용: 마지막 캔들의 진입/청산 조건별 지표값
+    indicator_snapshot: Optional[list[dict]] = None

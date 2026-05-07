@@ -142,7 +142,7 @@ export default function StrategyForm({ onClose, initialConfig }: Props) {
   }
 
   return (
-    <div className="space-y-5 max-h-[80vh] overflow-y-auto pr-1">
+    <div className="space-y-5">
       {/* 기본 정보 */}
       <div className="space-y-3">
         <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wide">기본 설정</h3>
