@@ -206,6 +206,7 @@ class AutoTradeBot:
             "market_type": "spot",         # "spot" | "futures"
             "leverage": 5,                 # 레버리지 배수 (1~20)
             "margin_mode": "cross",        # "cross" | "isolated"
+            "enable_short": False,         # True: 롱+숏 양방향 / False: 롱 전용 (선물만 해당)
         }
 
     # ── 프로퍼티 ─────────────────────────────────────────────────────────────
@@ -1484,10 +1485,12 @@ class AutoTradeBot:
     async def _enter_futures_from_scan(self, scan_results: list[dict]):
         """선물 스캔 결과에서 신규 포지션 진입."""
         min_score = self.settings["min_score"] + self._current_regime.get("min_score_delta", 0)
+        enable_short = self.settings.get("enable_short", False)
         candidates = [
             r for r in scan_results
             if r["score"] >= min_score
             and r["symbol"] not in self._futures_positions
+            and (enable_short or r.get("side", "long") == "long")
         ]
         for candidate in candidates:
             if len(self._futures_positions) >= self.settings["max_positions"]:
