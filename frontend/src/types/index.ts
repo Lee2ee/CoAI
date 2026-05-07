@@ -243,6 +243,7 @@ export interface AutoBotSettings {
   market_type?: 'spot' | 'futures'
   leverage?: number
   margin_mode?: 'cross' | 'isolated'
+  enable_short?: boolean
 }
 
 export interface FuturesPosition {
