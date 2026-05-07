@@ -1,22 +1,22 @@
 """
 AI 설정 관리 API - 프로바이더/모델/API키 동적 변경 지원.
-설정은 backend/ai_settings.json에 저장 (재시작 없이 즉시 적용).
+설정은 사용자별 DB에 저장 (재시작 없이 즉시 적용).
 """
-import json
 import httpx
 import logging
-from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from .deps import get_current_user
+from ..core.database import get_db
 from ..models.user import User
+from ..models.user_ai_config import UserAIConfig
 
 router = APIRouter(prefix="/ai-config", tags=["ai-config"])
 logger = logging.getLogger(__name__)
-
-SETTINGS_FILE = Path(__file__).parent.parent.parent / "ai_settings.json"
 
 PROVIDERS_META: dict = {
     "ollama": {
@@ -66,32 +66,29 @@ PROVIDERS_META: dict = {
     },
 }
 
-DEFAULT_SETTINGS: dict = {
-    "provider": "ollama",
-    "model": "llama3.2",
-    "api_key": "",
-    "ollama_url": "http://localhost:11434",
-}
+
+async def _get_or_create_config(user_id: int, db: AsyncSession) -> UserAIConfig:
+    result = await db.execute(select(UserAIConfig).where(UserAIConfig.user_id == user_id))
+    cfg = result.scalar_one_or_none()
+    if cfg is None:
+        cfg = UserAIConfig(user_id=user_id)
+        db.add(cfg)
+        await db.flush()
+    return cfg
 
 
-def _load() -> dict:
-    if SETTINGS_FILE.exists():
-        try:
-            return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return DEFAULT_SETTINGS.copy()
-
-
-def _save(data: dict):
-    SETTINGS_FILE.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-
-
-def get_ai_config() -> dict:
-    """auto_strategy.py 등 내부 서비스에서 현재 AI 설정을 가져올 때 사용"""
-    return _load()
+async def get_user_ai_config(user_id: int, db: AsyncSession) -> dict:
+    """내부 서비스에서 사용자별 AI 설정을 가져올 때 사용"""
+    result = await db.execute(select(UserAIConfig).where(UserAIConfig.user_id == user_id))
+    cfg = result.scalar_one_or_none()
+    if cfg is None:
+        return {"provider": "ollama", "model": "llama3.2", "api_key": "", "ollama_url": "http://localhost:11434"}
+    return {
+        "provider": cfg.provider,
+        "model": cfg.model,
+        "api_key": cfg.api_key,
+        "ollama_url": cfg.ollama_url,
+    }
 
 
 def _mask_key(key: str) -> str:
@@ -103,15 +100,18 @@ def _mask_key(key: str) -> str:
 
 
 @router.get("")
-async def get_config():
-    """현재 AI 설정 반환 (API 키는 마스킹)"""
-    cfg = _load()
+async def get_config(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """현재 사용자의 AI 설정 반환 (API 키는 마스킹)"""
+    cfg = await _get_or_create_config(user.id, db)
     return {
-        "provider": cfg.get("provider", "ollama"),
-        "model": cfg.get("model", "llama3.2"),
-        "api_key_masked": _mask_key(cfg.get("api_key", "")),
-        "api_key_set": bool(cfg.get("api_key", "")),
-        "ollama_url": cfg.get("ollama_url", "http://localhost:11434"),
+        "provider": cfg.provider,
+        "model": cfg.model,
+        "api_key_masked": _mask_key(cfg.api_key),
+        "api_key_set": bool(cfg.api_key),
+        "ollama_url": cfg.ollama_url,
         "providers": PROVIDERS_META,
     }
 
@@ -119,39 +119,45 @@ async def get_config():
 class AIConfigUpdate(BaseModel):
     provider: str
     model: str
-    api_key: Optional[str] = None   # None 또는 빈 문자열이면 기존 키 유지
+    api_key: Optional[str] = None
     ollama_url: Optional[str] = None
 
 
 @router.post("")
-async def save_config(body: AIConfigUpdate, user: User = Depends(get_current_user)):
-    """AI 설정 저장"""
+async def save_config(
+    body: AIConfigUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """현재 사용자의 AI 설정 저장"""
     if body.provider not in PROVIDERS_META:
         raise HTTPException(status_code=400, detail=f"지원하지 않는 프로바이더: {body.provider}")
 
-    cfg = _load()
-    cfg["provider"] = body.provider
-    cfg["model"] = body.model
-    if body.api_key:                           # 새 키가 있을 때만 덮어씀
-        cfg["api_key"] = body.api_key
+    cfg = await _get_or_create_config(user.id, db)
+    cfg.provider = body.provider
+    cfg.model = body.model
+    if body.api_key:
+        cfg.api_key = body.api_key
     if body.ollama_url:
-        cfg["ollama_url"] = body.ollama_url
+        cfg.ollama_url = body.ollama_url
 
-    _save(cfg)
-    logger.info(f"AI 설정 저장: provider={cfg['provider']} model={cfg['model']}")
-    return {"ok": True, "provider": cfg["provider"], "model": cfg["model"]}
+    logger.info(f"AI 설정 저장: user={user.id} provider={cfg.provider} model={cfg.model}")
+    return {"ok": True, "provider": cfg.provider, "model": cfg.model}
 
 
 @router.post("/test")
-async def test_connection(user: User = Depends(get_current_user)):
-    """현재 저장된 설정으로 AI 연결 테스트"""
-    cfg = _load()
-    provider = cfg.get("provider", "ollama")
-    api_key = cfg.get("api_key", "")
+async def test_connection(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """현재 사용자의 저장된 설정으로 AI 연결 테스트"""
+    cfg_dict = await get_user_ai_config(user.id, db)
+    provider = cfg_dict.get("provider", "ollama")
+    api_key = cfg_dict.get("api_key", "")
 
     try:
         if provider == "ollama":
-            base = cfg.get("ollama_url", "http://localhost:11434")
+            base = cfg_dict.get("ollama_url", "http://localhost:11434")
             async with httpx.AsyncClient(timeout=5) as client:
                 res = await client.get(f"{base}/api/tags")
             if res.status_code == 200:

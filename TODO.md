@@ -24,7 +24,7 @@
 | 동적 종목 발굴 (전체 업비트 스캔, 30분 캐시) | [x] | `scanner.py:_fetch_dynamic_symbols()` |
 | 자가 학습 전략 최적화 | [ ] | → **TODO 7** |
 | 공매도(Short Selling) 지원 | [ ] | → **TODO 8** |
-| 다중 거래소 지원 (Binance, Bybit) | [ ] | → **TODO 9** |
+| 다중 거래소 지원 (Binance, Bybit) | [x] | `connector.py`, `scanner.py`, `bot.py` |
 
 ### 포지션 (Position)
 
@@ -79,6 +79,29 @@
 | AI 설정 UI (프로바이더/모델/키) | [x] | `api/ai_config.py`, `user_ai_config.py` |
 | 자가 학습 전략 최적화 | [ ] | → **TODO 7** |
 | 멀티 에이전트 시스템 | [ ] | → **TODO 18** |
+
+### 바이낸스 선물거래 (Binance Futures)
+
+| 항목 | 상태 | 상세 |
+|------|------|------|
+| Binance Futures CCXT 커넥터 | [x] | `connector.py:BinanceFuturesConnector` |
+| 레버리지 설정 (포지션별, 기본 5x) | [x] | `bot.py:_open_futures_position()` |
+| 마진 모드 선택 (Cross / Isolated) | [x] | `bot.py:_open_futures_position()` |
+| 청산가(Liquidation Price) 계산 및 모니터링 | [x] | `connector.py:FuturesPaperBroker`, `bot.py:_check_single_futures_position()` |
+| 펀딩비(Funding Rate) 모니터링 | [x] | `bot.py:_check_funding_rates()` |
+| 롱/숏 양방향 포지션 관리 | [x] | `scanner.py:scan_futures_market()`, `bot.py:_cycle_futures()` |
+| 선물 전용 심볼 스캔 (USDT 페어) | [x] | `scanner.py:FUTURES_SYMBOLS`, `scan_futures_market()` |
+| Binance Futures Testnet 지원 | [x] | `config.py:BINANCE_FUTURES_TESTNET`, `connector.py:set_sandbox_mode()` |
+| 선물 거래 UI (레버리지·마진모드 설정) | [x] | `AutoTradePanel.tsx:FuturesPositionCard` |
+
+### UI / UX
+
+| 항목 | 상태 | 상세 |
+|------|------|------|
+| 전문 용어 툴팁 (RSI·HTF·마진모드 등) | [x] | `Tooltip.tsx` — AutoTradePanel, PositionDetailModal |
+| 커스텀 확인 모달 (confirm() 전면 교체) | [x] | `ConfirmModal.tsx` — 전략삭제·봇중단·포지션청산·계정삭제 |
+| 모의/실거래 전환 토글 (계좌·잔고 검증) | [x] | `AutoTradePanel.tsx:LiveSwitchModal` |
+| 설정 모달 스크롤 레이아웃 수정 | [x] | `SettingsModal` flex 레이아웃 (선물모드 확장 시 정상 스크롤) |
 
 ### 인프라 / 운영
 
@@ -751,6 +774,325 @@ async def restore_positions(self, db: Session) -> int:
 - [ ] 봇 강제 종료 후 재시작 시 `open` 상태 포지션이 메모리에 복원됨
 - [ ] 복원된 포지션이 이후 스캔 루프에서 정상 모니터링됨
 - [ ] 복원 포지션 0건이면 알림 생략
+
+---
+
+## [x] TODO 21. 바이낸스 선물거래 (Binance Futures)
+
+> **선행 의존성**: TODO 9(다중 거래소)의 ccxt 커넥터 기반 위에 구현.
+> 업비트는 현물 전용이므로 선물거래는 Binance Futures 전용 커넥터로 분리한다.
+
+**수정 파일**
+- `backend/app/services/exchange/connector.py` — `BinanceFuturesConnector` 클래스 추가
+- `backend/app/services/auto_trade/scanner.py` — `scan_futures_market()` 함수 추가
+- `backend/app/services/auto_trade/bot.py` — `AutoTradeBot` 에 선물 모드 분기 추가
+- `backend/app/services/risk/manager.py` — 레버리지 고려 리스크 계산 추가
+- `backend/app/models/auto_bot_trade.py` — 선물 관련 컬럼 추가
+- `backend/app/api/auto_bot.py` — 레버리지·마진모드 설정 엔드포인트 추가
+- `backend/app/core/config.py` — `BINANCE_FUTURES_TESTNET` 환경변수 추가
+- `frontend/src/components/AutoBot/AutoTradePanel.tsx` — 선물 설정 UI 추가
+
+---
+
+### 21-1. Binance Futures 커넥터
+
+`backend/app/services/exchange/connector.py` 에 클래스 추가:
+
+```python
+import ccxt.async_support as ccxt
+
+class BinanceFuturesConnector:
+    """
+    Binance USDT-M 선물 전용 커넥터.
+    testnet=True 이면 https://testnet.binancefuture.com 사용.
+    """
+
+    def __init__(self, api_key: str, secret: str, testnet: bool = False):
+        options = {"defaultType": "future"}
+        self.exchange = ccxt.binance({
+            "apiKey": api_key,
+            "secret": secret,
+            "options": options,
+        })
+        if testnet:
+            self.exchange.set_sandbox_mode(True)
+
+    async def set_leverage(self, symbol: str, leverage: int) -> None:
+        """심볼별 레버리지 설정. leverage: 1~125 (기본 5)."""
+        await self.exchange.set_leverage(leverage, symbol)
+
+    async def set_margin_mode(self, symbol: str, mode: str) -> None:
+        """mode: 'cross' | 'isolated'"""
+        await self.exchange.set_margin_mode(mode, symbol)
+
+    async def open_long(self, symbol: str, usdt_amount: float, leverage: int) -> dict:
+        """USDT 기준 매수. quantity = usdt_amount * leverage / mark_price."""
+        mark_price = await self.get_mark_price(symbol)
+        qty = (usdt_amount * leverage) / mark_price
+        order = await self.exchange.create_market_buy_order(symbol, qty)
+        return order
+
+    async def open_short(self, symbol: str, usdt_amount: float, leverage: int) -> dict:
+        mark_price = await self.get_mark_price(symbol)
+        qty = (usdt_amount * leverage) / mark_price
+        order = await self.exchange.create_market_sell_order(symbol, qty, {"reduceOnly": False})
+        return order
+
+    async def close_position(self, symbol: str, side: str, qty: float) -> dict:
+        """side: 'long' | 'short'. reduceOnly=True 로 포지션만 청산."""
+        if side == "long":
+            order = await self.exchange.create_market_sell_order(symbol, qty, {"reduceOnly": True})
+        else:
+            order = await self.exchange.create_market_buy_order(symbol, qty, {"reduceOnly": True})
+        return order
+
+    async def get_mark_price(self, symbol: str) -> float:
+        ticker = await self.exchange.fetch_ticker(symbol)
+        return ticker["markPrice"]
+
+    async def get_liquidation_price(self, symbol: str) -> float | None:
+        positions = await self.exchange.fetch_positions([symbol])
+        for p in positions:
+            if p["symbol"] == symbol and p["contracts"] > 0:
+                return p["liquidationPrice"]
+        return None
+
+    async def get_funding_rate(self, symbol: str) -> float:
+        """현재 펀딩비 반환. 양수=롱이 숏에게 지불, 음수=숏이 롱에게 지불."""
+        info = await self.exchange.fetch_funding_rate(symbol)
+        return info["fundingRate"]
+
+    async def get_ohlcv(self, symbol: str, timeframe: str = "1h", limit: int = 100) -> pd.DataFrame:
+        bars = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        return df
+
+    async def get_balance(self) -> dict:
+        """{'total': float, 'free': float, 'used': float} — USDT 기준."""
+        bal = await self.exchange.fetch_balance()
+        usdt = bal["USDT"]
+        return {"total": usdt["total"], "free": usdt["free"], "used": usdt["used"]}
+```
+
+---
+
+### 21-2. DB 모델 수정
+
+`backend/app/models/auto_bot_trade.py` 에 컬럼 추가:
+
+```python
+# 기존 컬럼 유지, 아래 추가
+market_type      = Column(String(8),  default="spot")    # "spot" | "futures"
+side             = Column(String(8),  default="long")    # "long" | "short"
+leverage         = Column(Integer,    default=1)
+margin_mode      = Column(String(16), default="cross")   # "cross" | "isolated"
+liquidation_price= Column(Float,      nullable=True)
+funding_paid     = Column(Float,      default=0.0)       # 누적 펀딩비 (USDT)
+```
+
+---
+
+### 21-3. 선물 전용 스캐너
+
+`backend/app/services/auto_trade/scanner.py` 에 함수 추가:
+
+```python
+FUTURES_SYMBOLS = [
+    "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT",
+    "XRP/USDT", "DOGE/USDT", "ADA/USDT", "AVAX/USDT",
+]
+
+async def scan_futures_market(
+    connector: BinanceFuturesConnector,
+    timeframe: str = "1h",
+    style: str = "short"
+) -> list[dict]:
+    """
+    FUTURES_SYMBOLS 를 순회하며 기존 _score() 로 점수 계산.
+    추가 조건: funding_rate 절댓값 > 0.001 (0.1%) 이면 해당 방향 신호 차감 -10.
+    반환: [{"symbol": str, "score": int, "side": "long"|"short", "funding_rate": float, ...}]
+    """
+```
+
+펀딩비 로직:
+- `funding_rate > +0.001` → 롱 신호 -10 (롱 포지션 비용 증가)
+- `funding_rate < -0.001` → 숏 신호 -10 (숏 포지션 비용 증가)
+
+---
+
+### 21-4. bot.py 선물 모드 분기
+
+`AutoTradeBot` 초기화 시 `market_type` 설정:
+
+```python
+class AutoTradeBot:
+    def __init__(self, ..., market_type: str = "spot"):
+        self.market_type = market_type  # "spot" | "futures"
+        if market_type == "futures":
+            self.futures_connector = BinanceFuturesConnector(
+                api_key=settings.BINANCE_API_KEY,
+                secret=settings.BINANCE_SECRET,
+                testnet=settings.BINANCE_FUTURES_TESTNET,
+            )
+```
+
+진입 로직 분기:
+```python
+async def _execute_entry(self, signal: dict):
+    if self.market_type == "futures":
+        await self.futures_connector.set_leverage(signal["symbol"], self.leverage)
+        await self.futures_connector.set_margin_mode(signal["symbol"], self.margin_mode)
+        if signal["side"] == "long":
+            order = await self.futures_connector.open_long(signal["symbol"], invest_usdt, self.leverage)
+        else:
+            order = await self.futures_connector.open_short(signal["symbol"], invest_usdt, self.leverage)
+        liq_price = await self.futures_connector.get_liquidation_price(signal["symbol"])
+        # liq_price 를 포지션 dict 에 저장
+    else:
+        # 기존 업비트 현물 로직
+```
+
+---
+
+### 21-5. 청산가 모니터링
+
+`_scan_loop()` 내 포지션 모니터링 루프에서 선물 포지션에 한해 청산가 체크:
+
+```python
+if self.market_type == "futures":
+    mark = await self.futures_connector.get_mark_price(pos["symbol"])
+    liq  = pos.get("liquidation_price")
+    if liq:
+        # 청산가까지 남은 거리 (%)
+        distance_pct = abs(mark - liq) / mark * 100
+        if distance_pct < 5.0:   # 청산가 5% 이내 접근
+            logger.warning(f"[청산가 경고] {pos['symbol']} 청산가 {liq:.2f} 까지 {distance_pct:.1f}% 남음")
+            await send_discord(f"[긴급] {pos['symbol']} 청산가 {distance_pct:.1f}% 이내 — 강제 청산 검토")
+            await self._close_position(pos)   # 강제 청산
+```
+
+---
+
+### 21-6. 펀딩비 모니터링
+
+`_scan_loop()` 에서 8시간마다 (UTC 00:00, 08:00, 16:00) 펀딩비 체크:
+
+```python
+async def _check_funding_rates(self):
+    for symbol, pos in self._positions.items():
+        if pos.get("market_type") != "futures":
+            continue
+        rate = await self.futures_connector.get_funding_rate(symbol)
+        pos["funding_rate"] = rate
+        # 펀딩비 > 0.05% 이면 디스코드 알림
+        if abs(rate) > 0.0005:
+            await send_discord(f"[펀딩비] {symbol} {rate*100:.4f}% — 포지션 방향 재검토 권장")
+```
+
+---
+
+### 21-7. 리스크 관리 (레버리지 고려)
+
+`backend/app/services/risk/manager.py:RiskManager` 에 레버리지 고려 메서드 추가:
+
+```python
+def calc_futures_position_size(
+    self,
+    usdt_balance: float,
+    leverage: int,
+    risk_pct: float = 0.02,    # 계좌 대비 최대 손실 허용 2%
+    sl_pct: float = 0.03       # 손절선 3%
+) -> float:
+    """
+    실제 손실 = 투자금 * sl_pct * leverage
+    투자금 = risk_pct * balance / (sl_pct * leverage)
+    레버리지가 높을수록 투자금이 작아져 리스크 일정 유지.
+    """
+    invest = (risk_pct * usdt_balance) / (sl_pct * leverage)
+    max_invest = usdt_balance * 0.2   # 계좌 20% 상한
+    return min(invest, max_invest)
+```
+
+---
+
+### 21-8. API 엔드포인트
+
+`backend/app/api/auto_bot.py` 에 추가:
+
+```python
+@router.post("/futures/settings")
+async def update_futures_settings(
+    leverage: int = Body(..., ge=1, le=20),       # 1~20배
+    margin_mode: str = Body(..., pattern="^(cross|isolated)$"),
+    user: User = Depends(get_current_user)
+):
+    """봇의 선물 레버리지·마진모드 설정 갱신."""
+    bot = get_auto_bot()
+    bot.leverage    = leverage
+    bot.margin_mode = margin_mode
+    return {"leverage": leverage, "margin_mode": margin_mode}
+
+@router.get("/futures/positions")
+async def get_futures_positions(user: User = Depends(get_current_user)):
+    """현재 선물 포지션 목록 (청산가·펀딩비 포함)."""
+```
+
+---
+
+### 21-9. 환경변수
+
+`backend/app/core/config.py` 에 추가:
+
+```python
+BINANCE_API_KEY: str = ""
+BINANCE_SECRET: str  = ""
+BINANCE_FUTURES_TESTNET: bool = True   # 기본 테스트넷, 실거래 시 False
+```
+
+`backend/.env.example` 에 추가:
+```bash
+BINANCE_API_KEY=
+BINANCE_SECRET=
+BINANCE_FUTURES_TESTNET=true
+```
+
+---
+
+### 21-10. 프론트엔드 UI
+
+`frontend/src/components/AutoBot/AutoTradePanel.tsx` 에 선물 설정 섹션 추가:
+
+- **거래 모드 토글**: `현물(업비트)` / `선물(Binance Futures)` 라디오 버튼
+- **레버리지 슬라이더**: 1x ~ 20x (선물 모드 선택 시 활성화)
+- **마진 모드 셀렉트**: Cross / Isolated
+- **포지션 카드 추가 표시 필드**: 청산가, 펀딩비, 레버리지
+
+`frontend/src/types/index.ts` 에 타입 추가:
+```typescript
+export interface FuturesPosition {
+  symbol: string;
+  side: "long" | "short";
+  leverage: number;
+  marginMode: "cross" | "isolated";
+  liquidationPrice: number | null;
+  fundingRate: number;
+  markPrice: number;
+  pnlPct: number;
+}
+```
+
+---
+
+### 완료 기준
+
+- [x] `BinanceFuturesConnector` 가 Binance Testnet 에서 `get_balance()` 성공
+- [x] `set_leverage(5)` + `open_long("BTC/USDT", 100, 5)` → 테스트넷 주문 체결 확인
+- [x] 청산가 5% 이내 접근 시 강제 청산 (시뮬레이션)
+- [x] `scan_futures_market()` 이 FUTURES_SYMBOLS 스캔 후 점수 리스트 반환
+- [x] `POST /api/auto-bot/futures/settings` 가 레버리지·마진모드 갱신
+- [x] `BINANCE_FUTURES_TESTNET=true` 설정 시 실계좌 영향 없음 확인
+- [x] 프론트엔드에서 선물 모드 전환 후 레버리지 슬라이더 활성화
 
 ---
 
