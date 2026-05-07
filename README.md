@@ -83,8 +83,8 @@ DEBUG=false
 PAPER_TRADING_DEFAULT=true
 
 # 포트 설정 — 이 두 값만 바꾸면 start.sh와 Vite 프록시에 자동 반영됩니다
-BACKEND_PORT=8001
-FRONTEND_PORT=5174
+BACKEND_PORT=8000
+FRONTEND_PORT=5173
 ```
 
 > `.env` 파일은 `.gitignore`에 포함되어 있어 저장소에 올라가지 않습니다.
@@ -154,21 +154,21 @@ bash start.sh
 ```bash
 # 백엔드
 cd backend
-../venv/Scripts/python -m uvicorn app.main:app --reload --port 8001   # Windows
-# source ../venv/bin/activate && uvicorn app.main:app --reload --port 8001  # macOS/Linux
+../venv/Scripts/python -m uvicorn app.main:app --reload --port 8000   # Windows
+# source ../venv/bin/activate && uvicorn app.main:app --reload --port 8000  # macOS/Linux
 
 # 프론트엔드 (포트와 프록시 대상을 env로 전달)
 cd frontend
-BACKEND_PORT=8001 FRONTEND_PORT=5174 npm run dev
+BACKEND_PORT=8000 FRONTEND_PORT=5173 npm run dev
 ```
 
 기본 접속 URL (포트를 변경하지 않은 경우):
 
 | 서비스 | URL |
 |---|---|
-| Frontend UI | http://localhost:5174 |
-| Backend API | http://localhost:8001 |
-| API Docs (Swagger) | http://localhost:8001/docs |
+| Frontend UI | http://localhost:5173 |
+| Backend API | http://localhost:8000 |
+| API Docs (Swagger) | http://localhost:8000/docs |
 
 ---
 
@@ -248,8 +248,8 @@ UI → AI 설정 → `ollama` 선택 → URL `http://localhost:11434` → 저장
 
 | 변수 | 설명 | 기본값 |
 |---|---|---|
-| `BACKEND_PORT` | 백엔드 서버 포트 | `8001` |
-| `FRONTEND_PORT` | 프론트엔드 개발 서버 포트 | `5174` |
+| `BACKEND_PORT` | 백엔드 서버 포트 | `8000` |
+| `FRONTEND_PORT` | 프론트엔드 개발 서버 포트 | `5173` |
 | `SECRET_KEY` | JWT 서명 키 **(필수 변경)** | `change-me-...` |
 | `DATABASE_URL` | SQLAlchemy DB URL | `sqlite+aiosqlite:///./coai.db` |
 | `DEBUG` | 디버그 모드 | `false` |
