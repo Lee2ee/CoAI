@@ -12,7 +12,7 @@ import ConfirmModal from '../common/ConfirmModal'
 import type {
   AutoBotStatus, AutoBotPosition, AutoBotTradeLog, ScanResult,
   StylePreset, AutoBotTradeDB, AutoBotTradeStats, AiAnalysisLogEntry, PerformanceStats,
-  FuturesPosition,
+  FuturesPosition, ExchangeAccount,
 } from '../../types'
 import PositionDetailModal from './PositionDetailModal'
 import clsx from 'clsx'
@@ -119,6 +119,13 @@ function SettingsModal({
   const set = (key: string, val: number | boolean | string) =>
     setForm(f => ({ ...f, [key]: val }))
 
+  const { data: accounts = [] } = useQuery<ExchangeAccount[]>({
+    queryKey: ['exchange-accounts'],
+    queryFn: async () => (await api.get('/exchange-accounts/')).data,
+    staleTime: 30_000,
+  })
+  const connectedExchanges = new Set(accounts.map(a => a.exchange))
+
   // 스타일 프리셋 조회
   const { data: presets } = useQuery<Record<string, StylePreset>>({
     queryKey: ['style-presets'],
@@ -169,20 +176,38 @@ function SettingsModal({
           <div>
             <p className="text-xs text-slate-400 font-medium mb-2">거래소</p>
             <div className="grid grid-cols-3 gap-1.5">
-              {(['upbit', 'binance', 'bybit'] as const).map(ex => (
-                <button
-                  key={ex}
-                  onClick={() => set('exchange_id', ex)}
-                  className={clsx(
-                    'py-2 rounded-lg text-xs font-medium border transition-colors',
-                    (form.exchange_id ?? 'upbit') === ex
-                      ? `bg-brand-500/20 border-brand-500 ${EXCHANGE_COLOR[ex]}`
-                      : 'bg-surface-700 border-surface-600 text-slate-400 hover:text-slate-200'
-                  )}
-                >
-                  {EXCHANGE_LABEL[ex]}
-                </button>
-              ))}
+              {(['upbit', 'binance', 'bybit'] as const).map(ex => {
+                const connected = connectedExchanges.has(ex)
+                return (
+                  <button
+                    key={ex}
+                    disabled={!connected}
+                    onClick={() => connected && setForm(f => ({
+                      ...f,
+                      exchange_id: ex,
+                      ...(ex === 'upbit' ? { market_type: 'spot' } : {}),
+                    }))}
+                    className={clsx(
+                      'py-2 rounded-lg text-xs font-medium border transition-colors',
+                      !connected
+                        ? 'bg-surface-800 border-surface-700 text-slate-600 cursor-not-allowed'
+                        : (form.exchange_id ?? 'upbit') === ex
+                          ? `bg-brand-500/20 border-brand-500 ${EXCHANGE_COLOR[ex]}`
+                          : 'bg-surface-700 border-surface-600 text-slate-400 hover:text-slate-200'
+                    )}
+                  >
+                    <span className="flex items-center justify-center gap-1">
+                      {EXCHANGE_LABEL[ex]}
+                      {!connected && (
+                        <Tooltip
+                          text={`${EXCHANGE_LABEL[ex]} 계정이 등록되지 않았습니다. 거래소 계정 메뉴에서 API 키를 등록하세요.`}
+                          iconOnly
+                        />
+                      )}
+                    </span>
+                  </button>
+                )
+              })}
             </div>
           </div>
 
@@ -190,27 +215,39 @@ function SettingsModal({
           <div>
             <p className="text-xs text-slate-400 font-medium mb-2">거래 모드</p>
             <div className="grid grid-cols-2 gap-1.5">
-              {(['spot', 'futures'] as const).map(mt => (
-                <button
-                  key={mt}
-                  onClick={() => set('market_type', mt)}
-                  className={clsx(
-                    'py-2 rounded-lg text-xs font-medium border transition-colors',
-                    (form.market_type ?? 'spot') === mt
-                      ? 'bg-brand-500/20 border-brand-500 text-brand-400'
-                      : 'bg-surface-700 border-surface-600 text-slate-400 hover:text-slate-200'
-                  )}
-                >
-                  <Tooltip
-                    text={mt === 'spot'
-                      ? '실제 암호화폐를 직접 매수·매도합니다. 레버리지 없이 보유 자산 한도 내에서 거래합니다.'
-                      : '미래 가격을 현재 약정하는 파생상품 거래입니다. 레버리지로 증폭 거래가 가능하며 롱·숏 양방향 거래를 지원합니다.'}
+              {(['spot', 'futures'] as const).map(mt => {
+                const isUpbit = (form.exchange_id ?? 'upbit') === 'upbit'
+                const isFuturesDisabled = mt === 'futures' && isUpbit
+                return (
+                  <button
+                    key={mt}
+                    disabled={isFuturesDisabled}
+                    onClick={() => !isFuturesDisabled && set('market_type', mt)}
+                    className={clsx(
+                      'py-2 rounded-lg text-xs font-medium border transition-colors',
+                      isFuturesDisabled
+                        ? 'bg-surface-800 border-surface-700 text-slate-600 cursor-not-allowed'
+                        : (form.market_type ?? 'spot') === mt
+                          ? 'bg-brand-500/20 border-brand-500 text-brand-400'
+                          : 'bg-surface-700 border-surface-600 text-slate-400 hover:text-slate-200'
+                    )}
                   >
-                    {mt === 'spot' ? '현물 (Spot)' : '선물 (Futures)'}
-                  </Tooltip>
-                </button>
-              ))}
+                    <Tooltip
+                      text={isFuturesDisabled
+                        ? '업비트는 현물 거래만 지원합니다. 선물 거래는 Binance 또는 Bybit을 선택하세요.'
+                        : mt === 'spot'
+                          ? '실제 암호화폐를 직접 매수·매도합니다. 레버리지 없이 보유 자산 한도 내에서 거래합니다.'
+                          : '미래 가격을 현재 약정하는 파생상품 거래입니다. 레버리지로 증폭 거래가 가능하며 롱·숏 양방향 거래를 지원합니다.'}
+                    >
+                      {mt === 'spot' ? '현물 (Spot)' : '선물 (Futures)'}
+                    </Tooltip>
+                  </button>
+                )
+              })}
             </div>
+            {(form.exchange_id ?? 'upbit') === 'upbit' && (
+              <p className="text-xs text-slate-500 mt-1.5">업비트는 현물 거래만 지원합니다.</p>
+            )}
             {(form.market_type ?? 'spot') === 'futures' && (
               <div className="mt-3 space-y-3">
                 {/* 레버리지 */}

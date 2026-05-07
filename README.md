@@ -83,8 +83,8 @@ DEBUG=false
 PAPER_TRADING_DEFAULT=true
 
 # 포트 설정 — 이 두 값만 바꾸면 start.sh와 Vite 프록시에 자동 반영됩니다
-BACKEND_PORT=8000
-FRONTEND_PORT=5173
+BACKEND_PORT=8001
+FRONTEND_PORT=5174
 ```
 
 > `.env` 파일은 `.gitignore`에 포함되어 있어 저장소에 올라가지 않습니다.
@@ -159,16 +159,16 @@ cd backend
 
 # 프론트엔드 (포트와 프록시 대상을 env로 전달)
 cd frontend
-BACKEND_PORT=8000 FRONTEND_PORT=5173 npm run dev
+BACKEND_PORT=8001 FRONTEND_PORT=5174 npm run dev
 ```
 
 기본 접속 URL (포트를 변경하지 않은 경우):
 
 | 서비스 | URL |
 |---|---|
-| Frontend UI | http://localhost:5173 |
-| Backend API | http://localhost:8000 |
-| API Docs (Swagger) | http://localhost:8000/docs |
+| Frontend UI | http://localhost:5174 |
+| Backend API | http://localhost:8001 |
+| API Docs (Swagger) | http://localhost:8001/docs |
 
 ---
 
