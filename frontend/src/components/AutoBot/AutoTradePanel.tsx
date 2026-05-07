@@ -116,6 +116,11 @@ function SettingsModal({
   const [form, setForm] = useState({ ...settings })
   const TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d']
 
+  useEffect(() => {
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = '' }
+  }, [])
+
   const set = (key: string, val: number | boolean | string) =>
     setForm(f => ({ ...f, [key]: val }))
 
