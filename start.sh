@@ -10,8 +10,8 @@ if [ -f backend/.env ]; then
   BACKEND_PORT=$(grep -E '^BACKEND_PORT=' backend/.env | cut -d= -f2 | tr -d ' \r')
   FRONTEND_PORT=$(grep -E '^FRONTEND_PORT=' backend/.env | cut -d= -f2 | tr -d ' \r')
 fi
-BACKEND_PORT=${BACKEND_PORT:-8001}
-FRONTEND_PORT=${FRONTEND_PORT:-5174}
+BACKEND_PORT=${BACKEND_PORT:-8000}
+FRONTEND_PORT=${FRONTEND_PORT:-5173}
 
 # 백엔드 시작
 echo "[1/2] 백엔드 시작 (http://localhost:${BACKEND_PORT})"
