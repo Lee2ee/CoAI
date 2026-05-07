@@ -141,6 +141,27 @@ class PortfolioRiskManager:
 
 # ── 성과 지표 계산 유틸 ──────────────────────────────────────────────────────
 
+def calc_futures_position_size(
+    usdt_balance: float,
+    leverage: int,
+    risk_pct: float = 0.02,   # 계좌 대비 최대 손실 허용 2%
+    sl_pct: float = 0.03,     # 손절선 3%
+) -> float:
+    """
+    레버리지를 고려한 선물 투자금 계산.
+
+    실제 손실 = 투자금 * sl_pct * leverage
+    → 투자금 = risk_pct * balance / (sl_pct * leverage)
+    레버리지가 높을수록 투자금이 작아져 리스크 일정 유지.
+    최대 계좌 20% 상한.
+    """
+    if sl_pct <= 0 or leverage <= 0:
+        return 0.0
+    invest = (risk_pct * usdt_balance) / (sl_pct * leverage)
+    max_invest = usdt_balance * 0.20   # 계좌 20% 상한
+    return round(min(invest, max_invest), 4)
+
+
 def calc_performance(trade_log: list[dict], initial_capital: float = 1_000_000) -> dict:
     """
     거래 로그로 주요 성과 지표 계산.
