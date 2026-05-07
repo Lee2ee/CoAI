@@ -23,7 +23,6 @@
 | 고급 캔들 패턴 (삼병사·역H&S·이중바닥·볼린저 반등) | [x] | `scanner.py:_detect_advanced_patterns()` |
 | 동적 종목 발굴 (전체 업비트 스캔, 30분 캐시) | [x] | `scanner.py:_fetch_dynamic_symbols()` |
 | 자가 학습 전략 최적화 | [ ] | → **TODO 7** |
-| 공매도(Short Selling) 지원 | [ ] | → **TODO 8** |
 | 다중 거래소 지원 (Binance, Bybit) | [x] | `connector.py`, `scanner.py`, `bot.py` |
 
 ### 포지션 (Position)
@@ -195,45 +194,6 @@ async def optimize_weights(db, min_samples: int = 10) -> dict:
 - [ ] `signal_performance` 테이블이 청산마다 upsert됨
 - [ ] `optimize_weights()` 가 10건 누적 시 호출되고 결과가 로그에 출력됨
 - [ ] 가중치 조정 후 다음 `_score()` 호출에 반영됨
-
----
-
-## [ ] TODO 8. 공매도(Short Selling) 지원
-
-> 현재 롱 전용. 선물 거래소(Binance Futures, Bybit)와 연동 시 구현 가능.
-> **TODO 9(다중 거래소)와 선행 의존성** — TODO 9 완료 후 구현.
-
-**수정 파일**
-- `backend/app/services/auto_trade/scanner.py` — 숏 신호 감지 로직 추가
-- `backend/app/services/auto_trade/bot.py` — `side` 파라미터를 `"buy"/"sell"` 로 분리
-- `backend/app/services/exchange/connector.py` — `open_short()`, `close_short()` 추가
-- `backend/app/models/auto_bot_trade.py` — `side` 컬럼 추가
-
-**구현 내용**
-
-`scanner.py:_score()` 에 숏 조건 블록 추가:
-```python
-# 숏 신호: RSI 과매수(>70) + 데드크로스 + 거래량 감소
-if rsi > 70 and ema_short < ema_long and volume_ratio < 0.8:
-    short_signals.append("RSI과매수")
-    short_score += 15
-```
-
-`connector.py` 에 선물 포지션 메서드 추가:
-```python
-async def open_short(self, symbol: str, amount: float) -> dict: ...
-async def close_short(self, symbol: str, amount: float) -> dict: ...
-```
-
-`auto_bot_trade.py` 의 `AutoBotTrade` 모델에 컬럼 추가:
-```python
-side = Column(String(8), default="long")   # "long" | "short"
-```
-
-**완료 기준**
-- [ ] `scan_market(side="short")` 호출 시 숏 신호 종목 반환
-- [ ] `connector.open_short()` 가 거래소 API 호출 성공
-- [ ] 숏 포지션의 PnL 계산이 롱과 반전되어 올바르게 계산됨
 
 ---
 
