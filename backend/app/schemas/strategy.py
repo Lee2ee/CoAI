@@ -29,6 +29,7 @@ class StrategyUpdate(BaseModel):
     description: Optional[str] = None
     config: Optional[dict[str, Any]] = None
     is_active: Optional[bool] = None
+    is_paper: Optional[bool] = None
 
 
 class StrategyRead(BaseModel):

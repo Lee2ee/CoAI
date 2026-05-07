@@ -129,7 +129,10 @@ function SettingsModal({
     queryFn: async () => (await api.get('/exchange-accounts/')).data,
     staleTime: 30_000,
   })
-  const connectedExchanges = new Set(accounts.map(a => a.exchange))
+  const isPaperMode = form.is_paper ?? true
+  const connectedExchanges = new Set(
+    accounts.filter(a => a.is_paper === isPaperMode && a.is_active).map(a => a.exchange)
+  )
 
   // 스타일 프리셋 조회
   const { data: presets } = useQuery<Record<string, StylePreset>>({
@@ -205,7 +208,7 @@ function SettingsModal({
                       {EXCHANGE_LABEL[ex]}
                       {!connected && (
                         <Tooltip
-                          text={`${EXCHANGE_LABEL[ex]} 계정이 등록되지 않았습니다. 거래소 계정 메뉴에서 API 키를 등록하세요.`}
+                          text={`${EXCHANGE_LABEL[ex]} ${isPaperMode ? '모의투자' : '실거래'} 계정이 등록되지 않았습니다. 거래소 계정 메뉴에서 API 키를 등록하세요.`}
                           iconOnly
                         />
                       )}
@@ -432,6 +435,25 @@ function SettingsModal({
               <NumRow label="최대 횟수" min={1} max={3}
                 value={form.max_add} onChange={v => set('max_add', v)}
                 tooltip="추매를 실행할 수 있는 최대 횟수입니다." />
+            </div>
+          </div>
+
+          {/* 피라미딩 */}
+          <div className="border-t border-surface-700 pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs text-slate-400 font-medium flex items-center gap-1">
+                피라미딩
+                <Tooltip text="포지션이 수익 구간(발동 수익률 이상)에 진입하고, 현재 시장 신호 점수가 최소 점수 이상일 때 초기 투자금의 50%를 추가 매수합니다. 수익 중인 포지션을 단계적으로 키워 수익을 극대화하는 전략입니다." iconOnly />
+              </p>
+              <Toggle checked={!!form.pyramid_enabled} onChange={v => set('pyramid_enabled', v)} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <NumRow label="발동 수익 (%)" min={1} max={20} step={0.5}
+                value={form.pyramid_threshold_pct ?? 3} onChange={v => set('pyramid_threshold_pct', v)}
+                tooltip="미실현 수익이 이 비율 이상이고 최신 스코어가 최소 점수를 넘으면 피라미딩이 실행됩니다." />
+              <NumRow label="최대 횟수" min={1} max={3}
+                value={form.max_pyramid ?? 2} onChange={v => set('max_pyramid', v)}
+                tooltip="피라미딩을 실행할 수 있는 최대 횟수입니다." />
             </div>
           </div>
 
@@ -696,6 +718,11 @@ function PositionCard({ pos, onClick, exchangeId }: { pos: AutoBotPosition; onCl
           {pos.add_count > 0 && (
             <span className="text-xs bg-up/20 text-up px-1.5 py-0.5 rounded flex items-center gap-0.5">
               <TrendingUp size={10} /> 추매 {pos.add_count}회
+            </span>
+          )}
+          {pos.pyramid_count > 0 && (
+            <span className="text-xs bg-brand-500/20 text-brand-400 px-1.5 py-0.5 rounded flex items-center gap-0.5">
+              <Sparkles size={10} /> 피라미딩 {pos.pyramid_count}회
             </span>
           )}
         </div>
@@ -1429,6 +1456,7 @@ export default function AutoTradePanel() {
           <span>일손실한도 <b className="text-amber-400">{status.settings.max_daily_loss_pct ?? 5}%</b></span>
           <span>물타기 <b className={status.settings.auto_avg_down ? 'text-amber-400' : 'text-slate-500'}>{status.settings.auto_avg_down ? `ON (${status.settings.avg_down_threshold_pct}%)` : 'OFF'}</b></span>
           <span>추매 <b className={status.settings.auto_add ? 'text-up' : 'text-slate-500'}>{status.settings.auto_add ? `ON (${status.settings.add_threshold_pct}%)` : 'OFF'}</b></span>
+          <span>피라미딩 <b className={status.settings.pyramid_enabled ? 'text-brand-400' : 'text-slate-500'}>{status.settings.pyramid_enabled ? `ON (${status.settings.pyramid_threshold_pct ?? 3}%)` : 'OFF'}</b></span>
           {isFutures && (
             <span className="text-amber-400 font-medium">
               선물 {status.settings.leverage ?? 5}x · {status.settings.margin_mode === 'isolated' ? 'Isolated' : 'Cross'}

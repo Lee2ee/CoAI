@@ -19,7 +19,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from ..exchange.connector import ExchangeConnector, PaperBroker, BinanceFuturesConnector, FuturesPaperBroker, FUTURES_FEE_RATE
 from .scanner import scan_market, scan_futures_market, FUTURES_SYMBOLS, STRATEGY_CONFIGS, STRATEGY_STYLE_CONFIGS, TIMEFRAME_MINUTES, HTF_MAP
 from . import ai_analyst
-from ..risk.manager import PortfolioRiskManager, calc_performance, calc_futures_position_size
+from ..risk.manager import PortfolioRiskManager, calc_performance, calc_futures_position_size, calc_kelly_fraction
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +202,10 @@ class AutoTradeBot:
             # 포트폴리오 리스크
             "max_daily_loss_pct": 5.0,     # 일일 총자산 대비 최대 손실 (%)
             "max_portfolio_exposure_pct": 80.0,  # 최대 투자 비중 (%)
+            # ── 피라미딩 ──────────────────────────────────────────────────────
+            "pyramid_enabled": False,      # 피라미딩 활성화
+            "pyramid_threshold_pct": 3.0,  # 발동 수익률 (%)
+            "max_pyramid": 2,              # 최대 횟수
             # ── 선물 거래 설정 ────────────────────────────────────────────────
             "market_type": "spot",         # "spot" | "futures"
             "leverage": 5,                 # 레버리지 배수 (1~20)
@@ -1105,6 +1109,14 @@ class AutoTradeBot:
                 ):
                     await self._add_to_position(symbol, "add", current_price)
 
+                # ── 피라미딩 ─────────────────────────────────────────────────
+                elif (
+                    self.settings.get("pyramid_enabled", False)
+                    and pos.get("pyramid_count", 0) < self.settings.get("max_pyramid", 2)
+                    and self._broker.balance.get(self._quote_currency, 0) >= 5_000
+                ):
+                    await self._check_pyramid_entry(symbol, current_price, scan_results)
+
             except Exception as e:
                 logger.warning(f"AutoBot: _check_positions {symbol}: {e}")
 
@@ -1247,7 +1259,22 @@ class AutoTradeBot:
             )
             total_value = krw + total_invested
 
-            invest_krw = krw * self.settings["position_size_pct"] / 100 * min(size_multiplier, 1.3)
+            # Kelly Criterion: 최근 30건 거래가 10건 이상이면 Kelly 비중 적용
+            recent = self._trade_log[:30]
+            kelly_invest = None
+            if len(recent) >= 10:
+                pnl_list = [t["pnl_pct"] for t in recent]
+                wins  = [x for x in pnl_list if x > 0]
+                losses = [x for x in pnl_list if x <= 0]
+                if wins and losses:
+                    wr = len(wins) / len(pnl_list)
+                    aw = sum(wins)  / len(wins)  / 100
+                    al = abs(sum(losses) / len(losses)) / 100
+                    kelly = calc_kelly_fraction(wr, aw, al)
+                    if kelly > 0:
+                        kelly_invest = total_value * kelly * min(size_multiplier, 1.3)
+
+            invest_krw = kelly_invest if kelly_invest else krw * self.settings["position_size_pct"] / 100 * min(size_multiplier, 1.3)
             invest_krw = min(invest_krw, krw * 0.95)  # 잔고 95% 초과 금지
 
             min_invest = 5_000 if self._quote_currency == "KRW" else 5
@@ -1311,6 +1338,7 @@ class AutoTradeBot:
                 # 카운터
                 "avg_down_count": 0,
                 "add_count": 0,
+                "pyramid_count": 0,
                 # 수수료 누적 (진입 수수료 → 청산 시 순손익 계산에 사용)
                 "total_fee_krw": entry_order.get("fee", 0),
             }
@@ -1368,6 +1396,70 @@ class AutoTradeBot:
             )
         except Exception as e:
             logger.error(f"AutoBot: {mode} 실패 {symbol}: {e}")
+
+    # ── 피라미딩 ─────────────────────────────────────────────────────────────
+
+    async def _check_pyramid_entry(self, symbol: str, current_price: float, scan_results: list[dict]):
+        """
+        피라미딩 진입 조건 확인 후 충족 시 추가 매수.
+        조건: pnl_pct >= pyramid_threshold AND 최신 스코어 >= min_score
+        """
+        pos = self._positions.get(symbol)
+        if pos is None:
+            return
+
+        pnl_pct = pos.get("unrealized_pnl_pct", 0.0)
+        threshold = self.settings.get("pyramid_threshold_pct", 3.0)
+        if pnl_pct < threshold:
+            return
+
+        # 최신 스캔 결과에서 해당 종목 스코어 확인
+        scan = next((r for r in scan_results if r["symbol"] == symbol), None)
+        min_score = self.settings["min_score"] + self._current_regime.get("min_score_delta", 0)
+        if scan is None or scan["score"] < min_score:
+            return
+
+        await self._pyramid_into_position(symbol, current_price)
+
+    async def _pyramid_into_position(self, symbol: str, price: float):
+        """피라미딩: 초기 투자금의 50% 추가 매수 후 평단 재계산 및 SL 재조정."""
+        pos = self._positions.get(symbol)
+        if pos is None:
+            return
+        try:
+            krw = self._broker.balance.get(self._quote_currency, 0)
+            invest_krw = krw * self.settings["position_size_pct"] / 100 * 0.5
+            invest_krw = min(invest_krw, krw * 0.5)
+
+            min_invest = 5_000 if self._quote_currency == "KRW" else 5
+            if invest_krw < min_invest:
+                return
+
+            amount = invest_krw / price
+            order = self._broker.execute_market_order(symbol, "buy", amount, price)
+            pos["total_fee_krw"] = pos.get("total_fee_krw", 0) + order.get("fee", 0)
+
+            # 평단가 재계산
+            total_cost = pos["avg_price"] * pos["total_amount"] + price * amount
+            pos["total_amount"] += amount
+            pos["avg_price"] = total_cost / pos["total_amount"]
+
+            # SL 새 평단 기준으로 재조정 (TP는 원래 목표 유지)
+            avg = pos["avg_price"]
+            sl_pct = self.settings["stop_loss_pct"]
+            pos["stop_loss_price"] = avg * (1 - sl_pct / 100)
+
+            now = datetime.now(KST).isoformat()
+            pos["entries"].append({"price": price, "amount": amount, "at": now, "type": "pyramid"})
+            pos["pyramid_count"] = pos.get("pyramid_count", 0) + 1
+
+            logger.info(
+                f"AutoBot 피라미딩 {symbol} @ {price:,.0f} ₩  "
+                f"새 평단={pos['avg_price']:,.0f}  횟수={pos['pyramid_count']}"
+            )
+        except Exception as e:
+            logger.error(f"AutoBot 피라미딩 실패 {symbol}: {e}")
+
 
     # ── 수동 조작 API 진입점 ─────────────────────────────────────────────────
 

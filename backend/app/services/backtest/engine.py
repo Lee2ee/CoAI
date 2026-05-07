@@ -38,6 +38,8 @@ class BacktestResult:
     equity_curve: list[float] = field(default_factory=list)
     timestamps: list[str] = field(default_factory=list)
 
+    indicator_snapshot: list = field(default_factory=list)
+
     # 성과 지표
     total_trades: int = 0
     win_trades: int = 0
@@ -139,6 +141,8 @@ class BacktestEngine:
         result.equity_curve = equity
         result.timestamps = timestamps
         self._compute_stats(result)
+        if result.total_trades == 0:
+            result.indicator_snapshot = self._snapshot(df)
         return result
 
     def run_walk_forward(self, df: pd.DataFrame, n_splits: int = 5) -> list[BacktestResult]:
@@ -155,6 +159,40 @@ class BacktestEngine:
             if len(chunk) > 60:
                 results.append(self.run(chunk))
         return results
+
+    def _snapshot(self, df: pd.DataFrame) -> list[dict]:
+        """마지막 캔들 기준 각 조건의 지표 현재값 반환 (0거래 진단용)"""
+        from ..indicator.engine import compute_indicator
+        seen: dict[str, float | str] = {}
+        rows = []
+        all_conds = self.config.get("entry_conditions", []) + self.config.get("exit_conditions", [])
+        for cond in all_conds:
+            key = f"{cond['indicator']}_{cond.get('params', {})}"
+            if key in seen:
+                current_val = seen[key]
+            else:
+                try:
+                    result = compute_indicator(df, cond["indicator"], cond.get("params", {}))
+                    if result is None:
+                        current_val = "계산 불가"
+                    elif isinstance(result, pd.DataFrame):
+                        import pandas_ta as ta  # noqa: F401 – already imported at top
+                        col = next((c for c in result.columns if c.startswith("MACDh")), result.columns[0])
+                        v = result[col].dropna()
+                        current_val = round(float(v.iloc[-1]), 4) if not v.empty else "데이터 부족"
+                    else:
+                        v = result.dropna()
+                        current_val = round(float(v.iloc[-1]), 4) if not v.empty else "데이터 부족"
+                except Exception as e:
+                    current_val = f"오류: {e}"
+                seen[key] = current_val
+            rows.append({
+                "label": f"{cond['indicator']}({cond.get('params', {})})",
+                "current_value": current_val,
+                "operator": cond["operator"],
+                "threshold": cond.get("value"),
+            })
+        return rows
 
     def _compute_stats(self, result: BacktestResult):
         if not result.trades:
@@ -187,7 +225,7 @@ class BacktestEngine:
         # Profit Factor
         gross_profit = sum(t.pnl for t in result.trades if t.pnl > 0)
         gross_loss = abs(sum(t.pnl for t in result.trades if t.pnl < 0))
-        result.profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+        result.profit_factor = round(gross_profit / gross_loss, 4) if gross_loss > 0 else 0.0
 
         # Max consecutive losses
         streak = 0

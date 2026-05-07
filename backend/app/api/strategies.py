@@ -109,14 +109,11 @@ async def update_strategy(
         strategy.description = data.description
     if data.config is not None:
         strategy.config = data.config
+    if data.is_paper is not None:
+        strategy.is_paper = data.is_paper
 
     if data.is_active is not None and data.is_active != strategy.is_active:
         if data.is_active:
-            if not strategy.is_paper:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Live trading requires prior paper trading validation. Set is_paper=True first.",
-                )
             await get_scheduler().activate_strategy(strategy)
         else:
             await get_scheduler().deactivate_strategy(strategy_id)
