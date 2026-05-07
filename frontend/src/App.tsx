@@ -1,9 +1,8 @@
 import { BrowserRouter, Routes, Route, Navigate, Link, useLocation } from 'react-router-dom'
-import { BarChart2, LogOut, Home, KeyRound, Settings } from 'lucide-react'
+import { LogOut, Home, KeyRound, Settings } from 'lucide-react'
 import { useAuthStore } from './store/auth'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
-import BacktestPage from './pages/BacktestPage'
 import ExchangePage from './pages/ExchangePage'
 import SettingsPage from './pages/SettingsPage'
 import TickerBar from './components/Dashboard/TickerBar'
@@ -20,7 +19,6 @@ function Layout({ children }: { children: React.ReactNode }) {
             <span className="font-bold text-slate-100 text-lg">CoAI</span>
             <nav className="flex gap-1">
               <NavLink to="/" label="대시보드" icon={<Home size={15} />} active={location.pathname === '/'} />
-              <NavLink to="/backtest" label="백테스트" icon={<BarChart2 size={15} />} active={location.pathname === '/backtest'} />
               <NavLink to="/exchange" label="거래소" icon={<KeyRound size={15} />} active={location.pathname === '/exchange'} />
               <NavLink to="/settings" label="설정" icon={<Settings size={15} />} active={location.pathname === '/settings'} />
             </nav>
@@ -74,7 +72,6 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/" element={<ProtectedRoute><Layout><DashboardPage /></Layout></ProtectedRoute>} />
-        <Route path="/backtest" element={<ProtectedRoute><Layout><BacktestPage /></Layout></ProtectedRoute>} />
         <Route path="/exchange" element={<ProtectedRoute><Layout><ExchangePage /></Layout></ProtectedRoute>} />
         <Route path="/settings" element={<ProtectedRoute><Layout><SettingsPage /></Layout></ProtectedRoute>} />
         <Route path="*" element={<Navigate to="/" replace />} />

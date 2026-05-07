@@ -38,9 +38,20 @@ SCAN_SYMBOLS = [
     "SAND/KRW", "MANA/KRW", "ALGO/KRW", "HBAR/KRW", "VET/KRW",
 ]
 
+# Binance / Bybit USDT 고정 목록 (동적 발굴 실패 시 fallback)
+SCAN_SYMBOLS_USDT = [
+    "BTC/USDT", "ETH/USDT", "XRP/USDT", "SOL/USDT", "DOGE/USDT",
+    "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT", "ATOM/USDT",
+    "LTC/USDT", "BCH/USDT", "ETC/USDT", "TRX/USDT", "NEAR/USDT",
+    "APT/USDT", "OP/USDT", "SUI/USDT", "ARB/USDT", "MATIC/USDT",
+]
+
 # 동적 종목 캐시 (업비트 전체 KRW 거래량 순위, 30분 갱신)
 _dyn_all_krw: list[str] = []
 _dyn_all_ts: float = 0.0
+# 동적 종목 캐시 (Binance/Bybit USDT 거래량 순위, 30분 갱신)
+_dyn_all_usdt: list[str] = []
+_dyn_all_usdt_ts: float = 0.0
 _DYN_TTL: float = 1800.0
 
 # 매매 스타일별 최소 일 거래대금 (KRW)
@@ -49,6 +60,14 @@ STYLE_MIN_DAILY_VOLUME_KRW: dict[str, float] = {
     "short":    2_000_000_000,   # 20억  — 상위 15~20종목
     "mid":        500_000_000,   # 5억   — 상위 20~25종목
     "long":       100_000_000,   # 1억   — 전체 스캔
+}
+
+# 매매 스타일별 최소 일 거래대금 (USDT) — Binance/Bybit 기준
+STYLE_MIN_DAILY_VOLUME_USDT: dict[str, float] = {
+    "scalping": 3_500_000,   # $3.5M
+    "short":    1_500_000,   # $1.5M
+    "mid":        350_000,   # $350K
+    "long":        70_000,   # $70K
 }
 
 TIMEFRAME_MINUTES: dict[str, int] = {
@@ -566,59 +585,93 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         }
 
 
-async def _fetch_dynamic_symbols(connector: ExchangeConnector, style: str) -> list[str]:
+async def _fetch_dynamic_symbols(
+    connector: ExchangeConnector, style: str, exchange_id: str = "upbit"
+) -> list[str]:
     """
-    업비트 전체 KRW 마켓 24h 거래대금 기준 상위 종목 동적 발굴 (TODO 10).
+    24h 거래대금 기준 상위 종목 동적 발굴 (TODO 10).
     30분 캐시 적용 — 스타일별 상위 N 슬라이스만 다름.
+    업비트: KRW 마켓, Binance/Bybit: USDT 마켓.
     """
-    global _dyn_all_krw, _dyn_all_ts
+    global _dyn_all_krw, _dyn_all_ts, _dyn_all_usdt, _dyn_all_usdt_ts
     import time
 
-    if time.time() - _dyn_all_ts < _DYN_TTL and _dyn_all_krw:
-        top_n = {"scalping": 15, "short": 20, "mid": 30, "long": 40}.get(style, 20)
-        symbols = _dyn_all_krw[:top_n]
-        if "BTC/KRW" not in symbols:
-            symbols = ["BTC/KRW"] + symbols
-        return symbols
+    top_n = {"scalping": 15, "short": 20, "mid": 30, "long": 40}.get(style, 20)
+    is_upbit = exchange_id == "upbit"
+    quote = "KRW" if is_upbit else "USDT"
+    btc_sym = f"BTC/{quote}"
+    fallback = SCAN_SYMBOLS if is_upbit else SCAN_SYMBOLS_USDT
+
+    # 캐시 히트
+    if is_upbit:
+        if time.time() - _dyn_all_ts < _DYN_TTL and _dyn_all_krw:
+            symbols = _dyn_all_krw[:top_n]
+            if btc_sym not in symbols:
+                symbols = [btc_sym] + symbols
+            return symbols
+    else:
+        if time.time() - _dyn_all_usdt_ts < _DYN_TTL and _dyn_all_usdt:
+            symbols = _dyn_all_usdt[:top_n]
+            if btc_sym not in symbols:
+                symbols = [btc_sym] + symbols
+            return symbols
 
     try:
+        # 마켓 목록을 먼저 로드해 quote 통화 심볼만 필터링.
+        # fetch_tickers() 에 전체 마켓을 전달하면 URL이 너무 길어져 업비트 400 에러 발생.
+        await asyncio.wait_for(connector._exchange.load_markets(), timeout=15)
+        target_symbols = [
+            s for s in connector._exchange.markets
+            if s.endswith(f"/{quote}")
+        ]
         tickers = await asyncio.wait_for(
-            connector._exchange.fetch_tickers(),
+            connector._exchange.fetch_tickers(target_symbols),
             timeout=20,
         )
-        krw_pairs = [
+        pairs = [
             (sym, float(data.get("quoteVolume") or 0))
             for sym, data in tickers.items()
-            if sym.endswith("/KRW")
         ]
-        krw_pairs.sort(key=lambda x: x[1], reverse=True)
-        _dyn_all_krw = [sym for sym, _ in krw_pairs]
-        _dyn_all_ts = time.time()
-        logger.info(f"동적 종목 발굴: 업비트 KRW {len(_dyn_all_krw)}개 갱신")
+        pairs.sort(key=lambda x: x[1], reverse=True)
+        sym_list = [sym for sym, _ in pairs]
+
+        if is_upbit:
+            _dyn_all_krw = sym_list
+            _dyn_all_ts = time.time()
+            logger.info(f"동적 종목 발굴: 업비트 KRW {len(_dyn_all_krw)}개 갱신")
+        else:
+            _dyn_all_usdt = sym_list
+            _dyn_all_usdt_ts = time.time()
+            logger.info(f"동적 종목 발굴: {exchange_id} USDT {len(_dyn_all_usdt)}개 갱신")
     except Exception as e:
         logger.warning(f"동적 종목 발굴 실패, 고정 목록 사용: {e}")
-        return SCAN_SYMBOLS
+        return fallback
 
-    top_n = {"scalping": 15, "short": 20, "mid": 30, "long": 40}.get(style, 20)
-    symbols = _dyn_all_krw[:top_n]
-    if "BTC/KRW" not in symbols:
-        symbols = ["BTC/KRW"] + symbols
+    cache = _dyn_all_krw if is_upbit else _dyn_all_usdt
+    symbols = cache[:top_n]
+    if btc_sym not in symbols:
+        symbols = [btc_sym] + symbols
     return symbols
 
 
-async def scan_market(timeframe: str = "1h", style: str = "short") -> list[dict]:
+async def scan_market(
+    timeframe: str = "1h", style: str = "short", exchange_id: str = "upbit"
+) -> list[dict]:
     """
     전체 종목 스캔.
-    - TODO 10: 동적 종목 발굴 (업비트 전체 KRW 거래량 상위)
+    - TODO 10: 동적 종목 발굴 (거래량 상위 — KRW 또는 USDT 마켓)
     - 멀티 타임프레임: 상위봉 OHLCV 추가 fetch → mtf_confirmed 산출
     - 스타일별 거래량 필터 + 가중치 점수 → 내림차순 정렬
+    - exchange_id: "upbit" | "binance" | "bybit"
     """
-    connector = ExchangeConnector(exchange_id="upbit", is_paper=True)
-    min_vol = STYLE_MIN_DAILY_VOLUME_KRW.get(style, 10_000_000_000)
+    connector = ExchangeConnector(exchange_id=exchange_id, is_paper=True)
+    is_upbit = exchange_id == "upbit"
+    vol_table = STYLE_MIN_DAILY_VOLUME_KRW if is_upbit else STYLE_MIN_DAILY_VOLUME_USDT
+    min_vol = vol_table.get(style, 10_000_000_000 if is_upbit else 3_500_000)
     htf = HTF_MAP.get(timeframe, timeframe)
     results = []
 
-    symbols = await _fetch_dynamic_symbols(connector, style)
+    symbols = await _fetch_dynamic_symbols(connector, style, exchange_id)
 
     for symbol in symbols:
         try:
@@ -655,5 +708,128 @@ async def scan_market(timeframe: str = "1h", style: str = "short") -> list[dict]
             logger.debug(f"Skip {symbol}: {e}")
 
     await connector.close()
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results
+
+
+# ── 선물 전용 스캔 ────────────────────────────────────────────────────────────
+
+FUTURES_SYMBOLS = [
+    "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT",
+    "XRP/USDT", "DOGE/USDT", "ADA/USDT", "AVAX/USDT",
+    "LINK/USDT", "DOT/USDT", "NEAR/USDT", "LTC/USDT",
+    "BCH/USDT", "APT/USDT", "OP/USDT", "ARB/USDT",
+]
+
+
+async def scan_futures_market(
+    connector,          # BinanceFuturesConnector
+    timeframe: str = "1h",
+    style: str = "short",
+) -> list[dict]:
+    """
+    Binance Futures USDT-M 종목 스캔.
+    롱/숏 양방향 신호 감지 + 펀딩비 조정.
+    반환 dict에 'side': 'long'|'short' 필드 추가.
+    """
+    results = []
+    for symbol in FUTURES_SYMBOLS:
+        try:
+            df = await asyncio.wait_for(
+                connector.fetch_ohlcv(symbol, timeframe, limit=150),
+                timeout=12,
+            )
+            if len(df) < 60:
+                continue
+
+            # 기존 _score() 로 롱 신호 점수 계산
+            result = _score(df, symbol, style, htf_df=None)
+
+            # ── 숏 신호 계산 ──────────────────────────────────────────────────
+            close  = df["close"]
+            volume = df["volume"]
+
+            rsi_series = ta.rsi(close, length=14)
+            rsi = float(rsi_series.iloc[-1]) if rsi_series is not None and len(rsi_series) > 0 else 50.0
+
+            ema20 = ta.ema(close, length=20)
+            ema50 = ta.ema(close, length=50)
+            vol_avg = float(volume.iloc[-21:-1].mean()) if len(volume) >= 21 else 0.0
+            vol_now = float(volume.iloc[-1])
+            vol_ratio = vol_now / vol_avg if vol_avg > 0 else 1.0
+
+            short_score   = 0
+            short_signals: list[str] = []
+
+            if rsi > 70:
+                short_score += 25
+                short_signals.append(f"RSI 과매수 ({rsi:.1f})")
+            elif rsi > 65:
+                short_score += 12
+                short_signals.append(f"RSI 과열 ({rsi:.1f})")
+
+            if (ema20 is not None and ema50 is not None
+                    and len(ema20.dropna()) > 1 and len(ema50.dropna()) > 1):
+                e20_now  = float(ema20.iloc[-1])
+                e50_now  = float(ema50.iloc[-1])
+                e20_prev = float(ema20.iloc[-2])
+                e50_prev = float(ema50.iloc[-2])
+                if e20_now < e50_now and e20_prev >= e50_prev:
+                    short_score += 20
+                    short_signals.append("EMA 데드크로스 ✕")
+                elif e20_now < e50_now:
+                    short_score += 10
+                    short_signals.append("하락추세 (EMA20 < EMA50)")
+
+            macd_df = ta.macd(close, fast=12, slow=26, signal=9)
+            if macd_df is not None and len(macd_df.dropna()) >= 2:
+                cols   = macd_df.columns.tolist()
+                ml_now  = float(macd_df[cols[0]].iloc[-1])
+                ml_prev = float(macd_df[cols[0]].iloc[-2])
+                sg_now  = float(macd_df[cols[2]].iloc[-1])
+                sg_prev = float(macd_df[cols[2]].iloc[-2])
+                if ml_now < sg_now and ml_prev >= sg_prev:
+                    short_score += 20
+                    short_signals.append("MACD 데드크로스 ↓")
+                elif ml_now < sg_now:
+                    short_score += 8
+                    short_signals.append("MACD 약세")
+
+            if vol_ratio < 0.7:
+                short_score += 8
+                short_signals.append(f"거래량 감소 ({vol_ratio:.1f}x)")
+
+            # ── 펀딩비 조정 ───────────────────────────────────────────────────
+            funding_rate = 0.0
+            try:
+                funding_rate = await asyncio.wait_for(
+                    connector.get_funding_rate(symbol), timeout=5
+                )
+            except Exception:
+                pass
+            result["funding_rate"] = funding_rate
+
+            if funding_rate > 0.001:      # 롱 비용 증가 → 롱 점수 차감
+                result["score"] = max(0, result["score"] - 10)
+                result["signals"].append(f"펀딩비 높음 ({funding_rate * 100:.4f}%)")
+            elif funding_rate < -0.001:   # 숏 비용 증가 → 숏 점수 차감
+                short_score = max(0, short_score - 10)
+                short_signals.append(f"음수 펀딩비 ({funding_rate * 100:.4f}%)")
+
+            # ── 더 강한 방향 선택 ─────────────────────────────────────────────
+            if short_score > result["score"] and short_score >= 40:
+                result["score"]   = short_score
+                result["signals"] = short_signals
+                result["side"]    = "short"
+            else:
+                result["side"] = "long"
+
+            results.append(result)
+            await asyncio.sleep(0.2)
+        except asyncio.TimeoutError:
+            logger.debug(f"Timeout scanning futures {symbol}")
+        except Exception as e:
+            logger.debug(f"Skip futures {symbol}: {e}")
+
     results.sort(key=lambda x: x["score"], reverse=True)
     return results

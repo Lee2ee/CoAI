@@ -33,6 +33,38 @@ async def stop_bot(user: User = Depends(get_current_user)):
     return {"ok": True, "running": bot.is_running}
 
 
+@router.post("/pause")
+async def pause_bot(user: User = Depends(get_current_user)):
+    """일시정지: 신규 진입 차단, 기존 포지션 SL/TP 모니터 유지"""
+    bot = get_auto_bot()
+    bot.pause()
+    return {"ok": True, "paused": bot.is_paused}
+
+
+@router.post("/resume")
+async def resume_bot(user: User = Depends(get_current_user)):
+    """일시정지 해제: 정상 매매 복귀"""
+    bot = get_auto_bot()
+    bot.resume()
+    return {"ok": True, "paused": bot.is_paused}
+
+
+@router.post("/full-stop")
+async def full_stop_bot(
+    body: dict = Body(default={}),
+    user: User = Depends(get_current_user),
+):
+    """
+    중단:
+    - is_paper=True (모의): 전체 포지션 청산 + 잔고·기록 초기화 후 정지
+    - is_paper=False (실거래): 전체 포지션 청산 후 정지 (잔고 유지)
+    """
+    bot = get_auto_bot()
+    is_paper = body.get("is_paper", True)
+    await bot.full_stop(is_paper=is_paper)
+    return {"ok": True, "running": bot.is_running}
+
+
 @router.post("/scan")
 async def manual_scan(
     background_tasks: BackgroundTasks,
@@ -62,6 +94,25 @@ async def update_settings(
     bot = get_auto_bot()
     bot.update_settings(settings)
     return {"ok": True, "settings": bot.settings}
+
+
+@router.patch("/balance")
+async def set_paper_balance(
+    body: dict = Body(...),
+    user: User = Depends(get_current_user),
+):
+    """모의거래 KRW 잔고 설정"""
+    krw = body.get("krw")
+    if krw is None or not isinstance(krw, (int, float)):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="krw 값이 필요합니다.")
+    bot = get_auto_bot()
+    try:
+        bot.set_paper_balance(float(krw))
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "krw": bot._broker.balance.get(bot._quote_currency, 0)}
 
 
 # ── 포지션 수동 조작 ────────────────────────────────────────────────────────
@@ -131,6 +182,40 @@ async def get_trades(
         }
         for t in trades
     ]
+
+
+@router.post("/futures/settings")
+async def update_futures_settings(
+    body: dict = Body(...),
+    user: User = Depends(get_current_user),
+):
+    """선물 레버리지·마진모드 설정 갱신."""
+    bot = get_auto_bot()
+    leverage    = body.get("leverage")
+    margin_mode = body.get("margin_mode")
+
+    from fastapi import HTTPException
+    if leverage is not None:
+        if not isinstance(leverage, int) or not (1 <= leverage <= 20):
+            raise HTTPException(status_code=400, detail="leverage는 1~20 사이 정수여야 합니다.")
+        bot.settings["leverage"] = leverage
+    if margin_mode is not None:
+        if margin_mode not in ("cross", "isolated"):
+            raise HTTPException(status_code=400, detail="margin_mode는 'cross' 또는 'isolated'여야 합니다.")
+        bot.settings["margin_mode"] = margin_mode
+
+    return {
+        "ok": True,
+        "leverage":    bot.settings["leverage"],
+        "margin_mode": bot.settings["margin_mode"],
+    }
+
+
+@router.get("/futures/positions")
+async def get_futures_positions(user: User = Depends(get_current_user)):
+    """현재 선물 포지션 목록 (청산가·펀딩비·레버리지 포함)."""
+    bot = get_auto_bot()
+    return list(bot._futures_positions.values())
 
 
 @router.get("/trades/stats")

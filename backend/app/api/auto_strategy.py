@@ -21,7 +21,7 @@ from ..models.strategy import Strategy
 from ..services.exchange.connector import ExchangeConnector
 from ..services.indicator.engine import compute_indicator
 from .deps import get_current_user
-from .ai_config import get_ai_config
+from .ai_config import get_user_ai_config
 
 router = APIRouter(prefix="/auto-strategy", tags=["auto-strategy"])
 logger = logging.getLogger(__name__)
@@ -29,8 +29,7 @@ logger = logging.getLogger(__name__)
 
 # ─── LLM 호출 (ai_settings.json 기반) ─────────────────────────────────────
 
-async def _call_llm(system: str, user_msg: str) -> str:
-    cfg = get_ai_config()
+async def _call_llm(system: str, user_msg: str, cfg: dict) -> str:
     provider = cfg.get("provider", "ollama")
 
     if provider == "ollama":
@@ -283,9 +282,12 @@ class AutoStrategyRequest(BaseModel):
 
 
 @router.get("/provider")
-async def get_provider():
-    """현재 AI 프로바이더 설정 반환 (하위 호환)"""
-    cfg = get_ai_config()
+async def get_provider(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """현재 사용자의 AI 프로바이더 설정 반환"""
+    cfg = await get_user_ai_config(user.id, db)
     provider = cfg.get("provider", "ollama")
     needs_key = provider != "ollama"
     return {
@@ -337,6 +339,9 @@ async def generate_strategy(
 
     market_summary = _build_market_summary(df, symbol, req.timeframe)
 
+    # 사용자별 AI 설정 로드
+    ai_cfg = await get_user_ai_config(user.id, db)
+
     # 심볼을 프롬프트에 직접 주입
     system_prompt = SYSTEM_PROMPT.replace("{{SYMBOL}}", symbol).replace("{{TIMEFRAME}}", req.timeframe)
     user_prompt = (
@@ -347,7 +352,7 @@ async def generate_strategy(
     )
 
     # AI 호출
-    raw_text = await _call_llm(system_prompt, user_prompt)
+    raw_text = await _call_llm(system_prompt, user_prompt, ai_cfg)
 
     # JSON 파싱
     try:
@@ -380,7 +385,6 @@ async def generate_strategy(
 
     # 전략 저장
     name = req.strategy_name or f"AI전략 {symbol} {req.timeframe}"
-    ai_cfg = get_ai_config()
     strategy = Strategy(
         user_id=user.id,
         name=name,

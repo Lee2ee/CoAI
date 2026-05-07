@@ -21,6 +21,9 @@
   - 지원 프로바이더: Ollama (로컬 무료) · Groq (무료 API) · Anthropic · OpenAI · Gemini
 - **성과 분석**: Sharpe · Sortino · Calmar · MDD · Expectancy · Profit Factor
 - **모의거래 필수**: 전략 검증 전 실거래 차단 (PaperBroker 강제 적용)
+- **모의/실거래 전환**: AutoBot 패널에서 토글로 전환 — 실거래 전환 시 계좌 등록·잔고 유무 자동 검증
+- **안전 확인 UI**: 전략 삭제·봇 중단·포지션 청산 등 위험 동작 시 커스텀 확인 다이얼로그
+- **용어 툴팁**: RSI·MACD·HTF·마진모드·물타기 등 전문 용어에 마우스 오버 시 설명 표시
 
 ---
 
@@ -28,11 +31,11 @@
 
 | Layer | Stack |
 |---|---|
-| Backend | Python 3.13, FastAPI, SQLAlchemy 2.0, SQLite (aiosqlite) |
+| Backend | Python 3.11+, FastAPI, SQLAlchemy 2.0, SQLite (aiosqlite) |
 | Frontend | React 18, TypeScript, Vite, TailwindCSS |
 | Chart | lightweight-charts 4, Recharts |
 | State | Zustand, TanStack Query |
-| Exchange | ccxt 4.3.11 (Upbit) |
+| Exchange | ccxt 4 (Upbit · Binance · Bybit) |
 | AI | Ollama / Groq / Anthropic / OpenAI / Gemini (선택) |
 | Scheduler | APScheduler 3 |
 
@@ -78,6 +81,10 @@ SECRET_KEY=여기에_openssl로_생성한_값_입력   # 필수 변경
 DATABASE_URL=sqlite+aiosqlite:///./coai.db  # 기본값 유지 가능
 DEBUG=false
 PAPER_TRADING_DEFAULT=true
+
+# 포트 설정 — 이 두 값만 바꾸면 start.sh와 Vite 프록시에 자동 반영됩니다
+BACKEND_PORT=8000
+FRONTEND_PORT=5173
 ```
 
 > `.env` 파일은 `.gitignore`에 포함되어 있어 저장소에 올라가지 않습니다.
@@ -140,17 +147,22 @@ cd frontend && npm install && cd ..
 bash start.sh
 ```
 
+`start.sh`는 `backend/.env`의 `BACKEND_PORT` / `FRONTEND_PORT` 값을 읽어 자동으로 적용합니다.
+
 또는 각각 실행:
 
 ```bash
-# 백엔드 (Windows)
+# 백엔드
 cd backend
-../venv/Scripts/python -m uvicorn app.main:app --reload --port 8000
+../venv/Scripts/python -m uvicorn app.main:app --reload --port 8001   # Windows
+# source ../venv/bin/activate && uvicorn app.main:app --reload --port 8001  # macOS/Linux
 
-# 프론트엔드
+# 프론트엔드 (포트와 프록시 대상을 env로 전달)
 cd frontend
-npm run dev
+BACKEND_PORT=8000 FRONTEND_PORT=5173 npm run dev
 ```
+
+기본 접속 URL (포트를 변경하지 않은 경우):
 
 | 서비스 | URL |
 |---|---|
@@ -180,10 +192,23 @@ npm run dev
 
 | 파일 | 저장소 포함 | 설명 | 생성 방법 |
 |------|:-----------:|------|-----------|
-| `backend/.env` | ❌ gitignore | 앱 설정, JWT 키 | `.env.example` 복사 후 수정 |
+| `backend/.env` | ❌ gitignore | 앱 설정, JWT 키, **포트** | `.env.example` 복사 후 수정 |
 | `backend/ai_settings.json` | ❌ gitignore | AI 프로바이더/키 | UI에서 자동 생성 또는 직접 작성 |
 | `backend/coai.db` | ❌ gitignore | SQLite DB | 최초 실행 시 자동 생성 |
 | `backend/.env.example` | ✅ 포함 | 설정 템플릿 | 참고용 |
+
+---
+
+## 포트 변경
+
+`backend/.env` 한 곳에서만 수정합니다. `start.sh`와 Vite 개발 서버 프록시에 자동으로 반영됩니다.
+
+```env
+BACKEND_PORT=9000
+FRONTEND_PORT=3000
+```
+
+변경 후 `bash start.sh`를 다시 실행하면 적용됩니다.
 
 ---
 
@@ -223,13 +248,15 @@ UI → AI 설정 → `ollama` 선택 → URL `http://localhost:11434` → 저장
 
 | 변수 | 설명 | 기본값 |
 |---|---|---|
+| `BACKEND_PORT` | 백엔드 서버 포트 | `8001` |
+| `FRONTEND_PORT` | 프론트엔드 개발 서버 포트 | `5174` |
 | `SECRET_KEY` | JWT 서명 키 **(필수 변경)** | `change-me-...` |
 | `DATABASE_URL` | SQLAlchemy DB URL | `sqlite+aiosqlite:///./coai.db` |
 | `DEBUG` | 디버그 모드 | `false` |
 | `PAPER_TRADING_DEFAULT` | 기본 모의거래 여부 | `true` |
-| `AI_PROVIDER` | AI 프로바이더 (`.env` 기본값) | `ollama` |
-| `GROQ_API_KEY` | Groq API 키 (`.env` 방식) | `` |
-| `ANTHROPIC_API_KEY` | Anthropic API 키 (`.env` 방식) | `` |
+| `AI_PROVIDER` | AI 프로바이더 | `ollama` |
+| `GROQ_API_KEY` | Groq API 키 | `` |
+| `ANTHROPIC_API_KEY` | Anthropic API 키 | `` |
 | `MAX_POSITION_SIZE_PCT` | 최대 포지션 비율(%) | `10.0` |
 | `MAX_DAILY_LOSS_PCT` | 일일 최대 손실 제한(%) | `5.0` |
 
@@ -267,11 +294,14 @@ CoAI/
 │   │   ├── App.tsx
 │   │   ├── types/index.ts
 │   │   └── components/
+│   │       ├── common/           # Modal, ConfirmModal, Tooltip
 │   │       ├── AutoBot/          # AutoTradePanel, PositionDetailModal
-│   │       ├── Strategy/         # StrategyForm, ConditionBuilder
+│   │       ├── Exchange/         # ExchangeAccountForm
+│   │       ├── Strategy/         # StrategyForm, ConditionBuilder, StrategyCard
 │   │       └── Chart/            # TradingChart
+│   ├── vite.config.ts            # 포트·프록시 설정 (env에서 자동 읽음)
 │   └── package.json
-├── start.sh                      # 개발 서버 동시 실행
+├── start.sh                      # 개발 서버 동시 실행 (.env 포트 자동 적용)
 └── README.md
 ```
 
