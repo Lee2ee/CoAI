@@ -534,6 +534,21 @@ FastAPI 라우터 (backend/app/api/*.py)
 | 거래 통계 | REST 폴링 | 30초 |
 | AutoBot 미실현 손익 | REST 폴링 (bot.py) | 15초 |
 
+### AutoBot 백엔드 가격 모니터링 주기
+
+AutoBot이 **서버 내부**에서 가격을 확인하는 주기입니다 (UI 갱신과 별개).
+
+| 동작 | 코드 | 주기 |
+|------|------|------|
+| 보유 포지션 현재가 조회 (SL/TP/트레일링 체크) | `bot.py` `_rest_price_monitor_loop()` — `asyncio.sleep(1)` | **1초** |
+| 오류 발생 시 재시도 대기 | 동일 함수 — `asyncio.sleep(5)` | 5초 |
+| 새 종목 진입 신호 스캔 (scalping) | APScheduler `IntervalTrigger(minutes=1)` | 1분 |
+| 새 종목 진입 신호 스캔 (short) | APScheduler `IntervalTrigger(minutes=5)` | 5분 |
+| 새 종목 진입 신호 스캔 (mid) | APScheduler `IntervalTrigger(minutes=15)` | 15분 |
+| 새 종목 진입 신호 스캔 (long) | APScheduler `IntervalTrigger(minutes=60)` | 60분 |
+
+> **요약**: 이미 포지션을 보유 중이면 **1초마다** 가격을 확인합니다. 새 진입 기회는 타임프레임(scalping~long)에 따라 1~60분 주기로 스캔합니다.
+
 ---
 
 ## 10. 주요 API 엔드포인트 빠른 참조
@@ -591,3 +606,223 @@ AI 설정
   GET    /api/v1/market/ticker        현재가
   WS     /ws/ticker                   실시간 시세
 ```
+
+---
+
+## 11. AI 호출 상세 분석
+
+AI 기능이 활성화된 경우, 어느 시점에 얼마나 호출되고 토큰을 얼마나 쓰는지 정리합니다.
+
+**코드 위치**: `backend/app/services/auto_trade/ai_analyst.py`
+
+---
+
+### 11-1. AI 호출 종류 및 발생 조건
+
+#### (1) 시장 국면 감지 — `detect_regime()`
+
+| 항목 | 내용 |
+|------|------|
+| 발생 조건 | 봇 실행 중 매 사이클마다 체크, **15분 이내 재호출 차단** |
+| 추가 조건 | `ai_regime_detection` 설정 ON + `is_ai_available()` |
+| 캐시 TTL | 15분 (`CACHE_TTL["regime"] = 900`), BTC 가격 1% 단위로 캐시 키 생성 |
+| 실제 호출 주기 | BTC 가격이 1% 이상 변동할 때마다 (하루 20~40회) |
+| 입력 토큰 | ~120~150 tokens (BTC 최근 10봉 종가 + RSI + 거래량 비율) |
+| 출력 max_tokens | 100 |
+| 실제 출력 | ~40~60 tokens (JSON only) |
+| **호출당 총 토큰** | **~160~210 tokens** |
+| 코드 | `bot.py:_run_regime_detection()` line ~918, `ai_analyst.py:detect_regime()` |
+
+#### (2) 진입 확인 — `check_entry()`
+
+| 항목 | 내용 |
+|------|------|
+| 발생 조건 | 스캔 후 진입 후보 종목마다 1회 (캐시 미스 시) |
+| 추가 조건 | `ai_entry_validation` 설정 ON + 후보 점수 ≥ min_score |
+| 캐시 TTL | 10분 (`CACHE_TTL["entry"] = 600`), 키: `entry:{symbol}:{score}:{strategy_type}` |
+| 입력 토큰 | ~80~100 tokens (종목명, 점수, 전략 타입, RSI, 신호 최대 3개) |
+| 출력 max_tokens | 80 |
+| 실제 출력 | ~40~60 tokens |
+| **호출당 총 토큰** | **~120~160 tokens** |
+| 결과 활용 | `confidence < 65` 시 진입 차단, `≥ 90` 시 포지션 크기 1.2배 |
+| 코드 | `bot.py:_enter_from_scan()` line ~1369, `ai_analyst.py:check_entry()` |
+
+#### (3) 포지션 스타일 선택 — `choose_position_style()`
+
+| 항목 | 내용 |
+|------|------|
+| 발생 조건 | 진입 확인(check_entry) 직후 동일 후보 종목에 연속 호출 |
+| 추가 조건 | `ai_entry_validation` ON + 급등 종목 아닌 경우 (급등 시 short 고정) |
+| 캐시 TTL | 10분, 키: `pstyle:{symbol}:{strategy_type}:{int(rsi)}` |
+| 입력 토큰 | ~120~150 tokens (종목, 전략, RSI, 점수, 신호, 스타일 힌트) |
+| 출력 max_tokens | 60 |
+| 실제 출력 | ~30~50 tokens |
+| **호출당 총 토큰** | **~150~200 tokens** |
+| 결과 활용 | scalping / short / mid / long 중 선택 → 해당 포지션 SL/TP/트레일링 기준 적용 |
+| 코드 | `bot.py:_enter_from_scan()` line ~1421, `ai_analyst.py:choose_position_style()` |
+
+> 진입 1건당 (2)+(3) 합산: **~270~360 tokens**
+
+#### (4) 청산 타이밍 보조 — `check_exit()`
+
+| 항목 | 내용 |
+|------|------|
+| 발생 조건 | 이익 중인 포지션 + 트레일링 미활성 + 스타일별 최소 수익 도달 시 |
+| 최소 수익 기준 | scalping 0.8% / short 1.5% / mid 3.0% / long 5.0% |
+| 체크 주기 | 15초(REST 폴링)마다 조건 확인 → 캐시로 실제 AI 호출 절약 |
+| 캐시 TTL | 5분 (`CACHE_TTL["exit"] = 300`), 키: `exit:{symbol}:{int(pnl_pct*10)}` |
+| 실제 호출 주기 | 수익률 0.1% 변동마다 캐시 키 변경 → 최대 5분마다 1회 |
+| 입력 토큰 | ~90~110 tokens (종목, PnL%, 전략, SL 여유 %, 신호) |
+| 출력 max_tokens | 80 |
+| 실제 출력 | ~30~60 tokens |
+| **호출당 총 토큰** | **~120~170 tokens** |
+| 결과 활용 | `close_now` → 즉시 청산, `tighten_sl` → SL 상향, `hold` → 유지 |
+| 코드 | `bot.py:_check_positions()` line ~1198, `ai_analyst.py:check_exit()` |
+
+#### (5) 연속 손절 자기 분석 — `analyze_losses()`
+
+| 항목 | 내용 |
+|------|------|
+| 발생 조건 | stop_loss로 청산된 횟수가 **연속 3회** 달성 시 1회만 실행 |
+| 추가 조건 | `ai_loss_analysis` ON + 직전 손실 거래 최대 5건 전달 |
+| 캐시 | 없음 (실행 후 `_consecutive_losses = 0` 리셋) |
+| 입력 토큰 | ~100~130 tokens (최근 5건 거래 요약 + 현재 SL/min_score 설정) |
+| 출력 max_tokens | 100 |
+| 실제 출력 | ~50~80 tokens |
+| **호출당 총 토큰** | **~150~210 tokens** |
+| 결과 활용 | SL % 자동 상향 (최대 +2.0%), min_score 자동 상향 (최대 +10) |
+| 코드 | `bot.py:_close_position()` line ~1943, `ai_analyst.py:analyze_losses()` |
+
+#### (6) AI 전략 자동 생성 — `_call_llm()` (auto_strategy)
+
+| 항목 | 내용 |
+|------|------|
+| 발생 조건 | 사용자가 대시보드 → "AI 전략 생성" 버튼 클릭 시 |
+| 빈도 | 수동 트리거, 자동 호출 없음 |
+| system prompt | ~400 tokens (전략 JSON 형식, 조건 규칙 설명) |
+| user prompt | ~250~300 tokens (종목 시세 + RSI/EMA/MACD/BB/Stoch/거래량) |
+| 입력 총 토큰 | **~650~700 tokens** |
+| 출력 max_tokens | 1500 |
+| 실제 출력 | ~400~800 tokens (전략 JSON) |
+| **호출당 총 토큰** | **~1,050~1,500 tokens** |
+| 코드 | `backend/app/api/auto_strategy.py:generate()` |
+
+---
+
+### 11-2. 하루 예상 호출 횟수 및 토큰 (단타 스타일 기준)
+
+> 단타 스타일 (scan_interval=5분, max_positions=4) 기준. 실제 시장 상황에 따라 다름.
+
+| 기능 | 하루 예상 호출 | 호출당 토큰 | 하루 예상 토큰 |
+|------|:----------:|:---------:|:----------:|
+| 시장 국면 감지 | 20~40회 | ~185 | ~3,700~7,400 |
+| 진입 확인 | 10~30회 | ~140 | ~1,400~4,200 |
+| 포지션 스타일 | 10~30회 | ~175 | ~1,750~5,250 |
+| 청산 타이밍 보조 | 20~60회 | ~145 | ~2,900~8,700 |
+| 연속 손절 분석 | 0~2회 | ~180 | ~0~360 |
+| **합계** | **60~162회** | — | **~9,750~25,910 tokens** |
+
+> 캐시 효과: 실제 API 호출은 위 수치의 30~50% 수준. 나머지는 인메모리 캐시에서 응답.
+
+---
+
+### 11-3. 프로바이더별 무료 한도 및 예상 비용
+
+#### Ollama (로컬 무료)
+
+- 비용: **완전 무료** (로컬 GPU/CPU 자원만 사용)
+- 응답 속도: CPU 전용 시 5~30초/호출, GPU 있으면 1~5초
+- 권장 모델: `llama3.2` (3B, 빠름) / `llama3.1` (8B, 품질 우수)
+- 주의: Ollama 프로세스가 항상 실행 중이어야 함
+
+#### Groq (무료 API, 추천)
+
+- 무료 한도: 분당 ~6,000 tokens, **일일 무제한** (실사용 무제한에 가까움)
+- 하루 예상 토큰: ~10,000~26,000 → **무료 한도 내**
+- 응답 속도: 평균 0.5~2초 (매우 빠름)
+- 주의: 분당 요청 수 제한 있음. 동시 다발 진입 시 429 오류 가능 → 자동 폴백 처리됨
+
+#### Gemini Flash (무료 티어)
+
+- 무료 한도: **분당 15회, 일 1,500회**
+- 하루 예상 호출: 60~162회 → **무료 한도 내**
+- 응답 속도: 평균 1~3초
+- 권장 모델: `gemini-2.0-flash` (무료 Flash 모델)
+
+#### Anthropic Claude
+
+| 모델 | 입력 단가 | 출력 단가 | 하루 예상 비용 |
+|------|:--------:|:--------:|:----------:|
+| claude-haiku-4-5 | $0.80/1M | $4.00/1M | ~$0.01~0.02 |
+| claude-sonnet-4-6 | $3.00/1M | $15.00/1M | ~$0.04~0.10 |
+
+> 월 30일 기준: Haiku ~$0.30~0.60, Sonnet ~$1.20~3.00
+
+#### OpenAI GPT
+
+| 모델 | 입력 단가 | 출력 단가 | 하루 예상 비용 |
+|------|:--------:|:--------:|:----------:|
+| gpt-4o-mini | $0.15/1M | $0.60/1M | ~$0.003~0.008 |
+| gpt-4o | $2.50/1M | $10.00/1M | ~$0.04~0.10 |
+
+> 월 30일 기준: gpt-4o-mini ~$0.10~0.24, gpt-4o ~$1.20~3.00
+
+---
+
+### 11-4. 캐시 동작 원리
+
+모든 AI 호출에는 인메모리 캐시(`_cache` dict)가 적용됩니다. 동일 조건 재요청 시 LLM을 호출하지 않고 캐시된 결과를 반환합니다.
+
+```
+캐시 키 구조:
+  진입 확인:      "entry:{symbol}:{score}:{strategy_type}"
+  스타일 선택:    "pstyle:{symbol}:{strategy_type}:{rsi_int}"
+  시장 국면:      "regime:{btc_price_1pct_bucket}"
+  청산 보조:      "exit:{symbol}:{pnl_pct_x10_int}"
+
+TTL:
+  entry / pstyle:  600초 (10분)
+  regime:          900초 (15분)
+  exit:            300초 (5분)
+```
+
+캐시가 초기화되는 시점:
+- AI 설정 변경 시 (`ai_analyst.set_config()` 호출 시 `_cache.clear()`)
+- 서버 재시작 시 (메모리 휘발)
+
+---
+
+### 11-5. AI 실패 시 폴백 동작
+
+AI 호출이 실패해도 **봇은 정상 동작**합니다. 각 기능의 폴백:
+
+| 기능 | 실패 시 동작 |
+|------|-------------|
+| 시장 국면 감지 | ADX 규칙 기반 결과 유지 (AI 보완 없이 규칙만 사용) |
+| 진입 확인 | `enter=True, confidence=70` → 진입 허용, 포지션 크기 조정 없음 |
+| 포지션 스타일 | 규칙 기반 스타일 선택 (`_choose_style_rules()`) 결과 유지 |
+| 청산 타이밍 | `action=hold` → 청산 없이 기존 SL/TP 유지 |
+| 손절 분석 | 기본값 적용 (SL +0.5%, min_score +5) |
+| 전략 자동 생성 | UI에 오류 메시지 표시, 전략 미생성 |
+
+실패 원인: 타임아웃(25초), 네트워크 오류, API 키 없음, 요청 한도 초과(429)
+
+---
+
+### 11-6. AI 없이 동작하는 기능 (규칙 기반)
+
+AI를 설정하지 않아도 다음 기능은 규칙 기반으로 정상 동작합니다:
+
+| 기능 | 규칙 기반 대체 |
+|------|--------------|
+| 시장 국면 감지 | ADX < 20 → 횡보장, ADX ≥ 20 → 추세장 |
+| 포지션 스타일 | RSI + 신호 키워드 + 점수로 선택 (`_choose_style_rules()`) |
+| 진입 여부 | 점수 ≥ min_score + MTF 확인만으로 진입 |
+| 청산 | SL/TP/트레일링 스탑 규칙으로만 운영 |
+
+**AI 미설정 시 비활성화되는 기능:**
+- 진입 신뢰도 검증 (confidence 기반 진입 차단)
+- 포지션 크기 자동 확대 (size_multiplier)
+- 연속 손절 자기 분석 (파라미터 자동 조정)
+- 청산 타이밍 AI 보조 (조기 청산 / SL 상향)
+- AI 전략 자동 생성 버튼
