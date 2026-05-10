@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, BackgroundTasks, Body, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func as sqlfunc
 from ..services.auto_trade.bot import get_auto_bot, TRADING_STYLE_PRESETS
+from ..services.risk.manager import calc_var
 from ..models.user import User
 from ..models.auto_bot_trade import AutoBotTrade
 from ..core.database import get_db
@@ -233,13 +234,15 @@ async def get_trade_stats(
             "avg_pnl_pct": 0.0, "best_trade_pct": 0.0, "worst_trade_pct": 0.0,
         }
     wins = [t for t in trades if t.pnl_krw > 0]
+    pnl_pct_list = [t.pnl_pct for t in trades]
     return {
         "total": len(trades),
         "win_trades": len(wins),
         "loss_trades": len(trades) - len(wins),
         "win_rate": round(len(wins) / len(trades) * 100, 1),
         "total_pnl_krw": round(sum(t.pnl_krw for t in trades)),
-        "avg_pnl_pct": round(sum(t.pnl_pct for t in trades) / len(trades), 2),
-        "best_trade_pct": round(max(t.pnl_pct for t in trades), 2),
-        "worst_trade_pct": round(min(t.pnl_pct for t in trades), 2),
+        "avg_pnl_pct": round(sum(pnl_pct_list) / len(trades), 2),
+        "best_trade_pct": round(max(pnl_pct_list), 2),
+        "worst_trade_pct": round(min(pnl_pct_list), 2),
+        "var_95": calc_var(pnl_pct_list),
     }

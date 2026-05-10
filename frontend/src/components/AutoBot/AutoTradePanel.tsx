@@ -1396,6 +1396,14 @@ export default function AutoTradePanel() {
               const pnl = tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.total_trades > 0 ? status.realized_pnl_krw : null
               return pnl !== null && pnl > 0 ? 'up' : pnl !== null && pnl < 0 ? 'down' : undefined
             })()}
+            sub={(() => {
+              const pnl = tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.total_trades > 0 ? status.realized_pnl_krw : null
+              if (pnl === null) return undefined
+              const initial = status.total_value_krw - status.realized_pnl_krw - status.unrealized_pnl_krw
+              if (initial <= 0) return undefined
+              const pct = pnl / initial * 100
+              return `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`
+            })()}
           />
           <StatCard
             label={`총 거래 ${tradeStats ? `(승률 ${tradeStats.win_rate}%)` : ''}`}
@@ -1575,12 +1583,24 @@ export default function AutoTradePanel() {
               )}>
                 <div>
                   <p className="text-slate-500 mb-0.5">누적 실현 손익{!(tradeStats && tradeStats.total > 0) && ' (세션)'}</p>
-                  <p className={clsx('text-base font-bold tabular-nums',
-                    (tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.realized_pnl_krw) >= 0 ? 'text-up' : 'text-down'
-                  )}>
-                    {(tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.realized_pnl_krw) >= 0 ? '+' : ''}
-                    {fmtCurrency(tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.realized_pnl_krw, exchangeId)}
-                  </p>
+                  {(() => {
+                    const pnl = tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.realized_pnl_krw
+                    const initial = status.total_value_krw - status.realized_pnl_krw - status.unrealized_pnl_krw
+                    const pct = initial > 0 ? pnl / initial * 100 : null
+                    const pos = pnl >= 0
+                    return (
+                      <div className="flex items-baseline gap-1.5">
+                        <p className={clsx('text-base font-bold tabular-nums', pos ? 'text-up' : 'text-down')}>
+                          {pos ? '+' : ''}{fmtCurrency(pnl, exchangeId)}
+                        </p>
+                        {pct !== null && (
+                          <span className={clsx('text-xs font-semibold tabular-nums', pos ? 'text-up/70' : 'text-down/70')}>
+                            ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)
+                          </span>
+                        )}
+                      </div>
+                    )
+                  })()}
                 </div>
                 <div><p className="text-slate-500 mb-0.5">총 거래</p><p className="text-slate-200 font-semibold">{tradeStats?.total ?? status.total_trades}건</p></div>
                 {tradeStats && tradeStats.total > 0 && <>
@@ -1927,7 +1947,7 @@ function AiActivityLog({
   )
 }
 
-function StatCard({ label, value, color }: { label: string; value: string; color?: 'up' | 'down' }) {
+function StatCard({ label, value, color, sub }: { label: string; value: string; color?: 'up' | 'down'; sub?: string }) {
   return (
     <div className="bg-surface-700 rounded-lg p-2.5">
       <p className="text-xs text-slate-500">{label}</p>
@@ -1935,6 +1955,12 @@ function StatCard({ label, value, color }: { label: string; value: string; color
         'text-sm font-semibold mt-0.5 tabular-nums',
         color === 'up' ? 'text-up' : color === 'down' ? 'text-down' : 'text-slate-100'
       )}>{value}</p>
+      {sub && (
+        <p className={clsx(
+          'text-xs tabular-nums mt-0.5',
+          color === 'up' ? 'text-up/70' : color === 'down' ? 'text-down/70' : 'text-slate-400'
+        )}>{sub}</p>
+      )}
     </div>
   )
 }

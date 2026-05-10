@@ -161,12 +161,14 @@ class AutoTradeBot:
         self._last_regime_at: float = 0.0          # 마지막 국면 감지 시각 (epoch)
         self._current_regime: dict = {             # 현재 시장 국면
             "regime": "ranging", "style": "short",
-            "min_score_delta": 0, "reason": "초기화"
+            "min_score_delta": 0, "reason": "초기화",
+            "strategy_mode": "momentum",
         }
         self._analysis_log: list[dict] = []        # AI 분석 기록 (최대 20건)
 
         # 포트폴리오 리스크 관리
         self._portfolio_risk = PortfolioRiskManager()
+        self._close_cache: dict[str, list[float]] = {}   # symbol → 1h 종가 리스트 (상관관계 체크용)
 
         # DB 전략 캐시 (Strategy Builder ↔ AutoBot 연동, TODO 9)
         self._db_strategy_cache: list[dict] = []
@@ -200,8 +202,14 @@ class AutoTradeBot:
             "ai_loss_analysis": True,      # 연속 손절 자기 분석
             "ai_exit_assist": True,        # 이익 구간 청산 타이밍 보조
             # 포트폴리오 리스크
-            "max_daily_loss_pct": 5.0,     # 일일 총자산 대비 최대 손실 (%)
+            "max_daily_loss_pct": 5.0,          # 일일 총자산 대비 최대 손실 (%)
             "max_portfolio_exposure_pct": 80.0,  # 최대 투자 비중 (%)
+            "correlation_threshold": 0.85,       # 종목 간 상관계수 진입 차단 임계값
+            "mdd_limit_pct": 20.0,              # MDD 이 값(%) 초과 시 봇 자동 중지
+            # ── 부분 청산 (TODO 22) ────────────────────────────────────────────
+            "partial_exit_enabled": False,      # 부분 청산 활성화
+            "partial_exit_ratio": 0.4,          # TP 트리거 도달 시 청산 비율 (40%)
+            "partial_exit_trigger_pct": 0.6,    # avg→TP 거리의 N% 도달 시 발동 (60%)
             # ── 피라미딩 ──────────────────────────────────────────────────────
             "pyramid_enabled": False,      # 피라미딩 활성화
             "pyramid_threshold_pct": 3.0,  # 발동 수익률 (%)
@@ -409,7 +417,7 @@ class AutoTradeBot:
             self._portfolio_risk = PortfolioRiskManager()
             self._consecutive_losses = 0
             self._last_regime_at = 0.0
-            self._current_regime = {"regime": "ranging", "style": "short", "min_score_delta": 0, "reason": "초기화"}
+            self._current_regime = {"regime": "ranging", "style": "short", "min_score_delta": 0, "reason": "초기화", "strategy_mode": "momentum"}
             self._strategy_performance = {
                 k: {"wins": 0, "losses": 0, "total_pnl": 0.0}
                 for k in self._strategy_performance
@@ -672,6 +680,11 @@ class AutoTradeBot:
         if price > pos["highest_price"]:
             pos["highest_price"] = price
 
+        # ── 부분 청산 체크 (TODO 22) ─────────────────────────────────────────
+        await self._check_partial_exit(symbol, price)
+        if symbol not in self._positions:  # 부분 청산 중 포지션 소멸 방어
+            return
+
         # ── 트레일링 스탑 ────────────────────────────────────────────────────
         if self.settings.get("trailing_stop"):
             pnl_pct = (price - avg) / avg * 100
@@ -718,6 +731,18 @@ class AutoTradeBot:
             return
         self._scan_in_progress = True
         try:
+            # ── MDD 자동 거래 중단 체크 (TODO 13) ─────────────────────────
+            if len(self._trade_log) >= 10:
+                perf = calc_performance(self._trade_log)
+                mdd_limit = self.settings.get("mdd_limit_pct", 20.0)
+                if perf["max_drawdown_pct"] >= mdd_limit:
+                    logger.warning(
+                        f"AutoBot MDD {perf['max_drawdown_pct']:.1f}% ≥ 한도 {mdd_limit}% "
+                        f"— 봇 자동 중지 (VaR95={perf['var_95']:.2f}%)"
+                    )
+                    await self.stop()
+                    return
+
             if self._is_futures:
                 await self._cycle_futures()
             else:
@@ -729,6 +754,9 @@ class AutoTradeBot:
 
     async def _cycle_spot(self):
         """현물 매매 사이클 (기존 로직)"""
+        # 국면 감지를 먼저 실행 → 스타일 변경 후 스캔
+        await self._run_regime_detection()
+
         scan_results = await scan_market(
             timeframe=self.settings["timeframe"],
             style=self.settings["trading_style"],
@@ -746,10 +774,12 @@ class AutoTradeBot:
         self._scan_results = scan_results
         self._last_scan_at = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
 
-        await self._run_regime_detection(scan_results)
         await self._check_positions(scan_results)
 
         if not self._paused and len(self._positions) < self.settings["max_positions"]:
+            # 상관관계 체크용 종가 캐시 갱신 (현재 보유 + 스캔 상위 후보)
+            top_candidates = [r["symbol"] for r in scan_results[:10]]
+            await self._refresh_close_cache(top_candidates)
             await self._enter_from_scan(scan_results)
 
     async def _cycle_futures(self):
@@ -778,21 +808,120 @@ class AutoTradeBot:
         if not self._paused and len(self._futures_positions) < self.settings["max_positions"]:
             await self._enter_futures_from_scan(scan_results)
 
+    # ── TODO 10: 포트폴리오 상관관계 캐시 ────────────────────────────────────
+
+    async def _refresh_close_cache(self, symbols: list[str]):
+        """
+        상관관계 계산용 1h 종가 캐시 업데이트.
+        현재 보유 종목 + 전달된 종목 리스트에 대해 60봉 1h OHLCV 조회.
+        캐시는 사이클마다 갱신되어 최신 상태 유지.
+        """
+        target = set(self._positions.keys()) | set(symbols)
+        for sym in target:
+            try:
+                df = await asyncio.wait_for(
+                    self._connector.fetch_ohlcv(sym, "1h", limit=60),
+                    timeout=8,
+                )
+                if df is not None and len(df) >= 10:
+                    self._close_cache[sym] = [float(x) for x in df["close"].tolist()]
+            except Exception:
+                pass
+
     # ── TODO 2: AI 시장 국면 감지 ────────────────────────────────────────────
 
-    async def _run_regime_detection(self, scan_results: list[dict]):
+    def _detect_regime_rules(
+        self,
+        btc_closes: list[float],
+        btc_rsi: float,
+        btc_volume_ratio: float,
+        btc_adx: float = 0.0,
+    ) -> dict:
         """
-        BTC 스캔 결과 기반 국면 감지. 15분 이내 재호출 차단.
-        국면이 바뀌면 min_score / trading_style 자동 조정.
+        규칙 기반 시장 국면 감지 (AI 없이 항상 동작).
+        BTC 기술 지표로 국면을 판단하고 최적 매매 스타일을 반환.
+
+        국면 판단 기준:
+          trending  : 20봉 변화 +5% 초과, RSI 50~75 → short/mid
+          bull_run  : 20봉 변화 +10% 초과, RSI 60+ → mid/long
+          volatile  : RSI < 28 or > 78, 또는 거래량 2.5x+ → scalping
+          downtrend : 20봉 변화 -8% 미만 → long (반등 대기) + 점수 +5
+          ranging   : 그 외 → short
+
+        strategy_mode:
+          mean_reversion : ADX < 20 (횡보장) → BB 하단 반등 매수 전략
+          momentum       : ADX >= 20 (추세장) → 기존 모멘텀 전략
+        """
+        if len(btc_closes) < 20:
+            return {"regime": "ranging", "style": "short", "min_score_delta": 0, "reason": "데이터 부족", "strategy_mode": "momentum"}
+
+        change_20 = (btc_closes[-1] - btc_closes[-20]) / btc_closes[-20] * 100
+
+        # 단기 변동성: 최근 5봉 최고/최저 범위
+        recent5 = btc_closes[-5:]
+        volatility_5 = (max(recent5) - min(recent5)) / min(recent5) * 100 if min(recent5) > 0 else 0
+
+        if btc_rsi > 78 or (btc_volume_ratio >= 2.5 and volatility_5 > 3.0):
+            regime, style, delta = "volatile", "scalping", -5
+            reason = f"과열 (RSI {btc_rsi:.0f}, 변동 {volatility_5:.1f}%, 거래량 {btc_volume_ratio:.1f}x)"
+        elif change_20 >= 10 and btc_rsi >= 60:
+            regime, style, delta = "trending", "mid", +5
+            reason = f"강한 상승추세 (20봉 {change_20:+.1f}%, RSI {btc_rsi:.0f})"
+        elif change_20 >= 5 and btc_rsi >= 50:
+            regime, style, delta = "trending", "short", +3
+            reason = f"상승추세 (20봉 {change_20:+.1f}%, RSI {btc_rsi:.0f})"
+        elif change_20 <= -8:
+            regime, style, delta = "downtrend", "long", +5
+            reason = f"하락추세 (20봉 {change_20:+.1f}%, RSI {btc_rsi:.0f})"
+        elif btc_rsi < 28:
+            regime, style, delta = "volatile", "scalping", 0
+            reason = f"과매도 반등 구간 (RSI {btc_rsi:.0f})"
+        elif change_20 <= -3 and btc_rsi < 45:
+            regime, style, delta = "ranging", "short", +3
+            reason = f"약세 횡보 (20봉 {change_20:+.1f}%, RSI {btc_rsi:.0f})"
+        else:
+            regime, style, delta = "ranging", "short", 0
+            reason = f"횡보 (20봉 {change_20:+.1f}%, RSI {btc_rsi:.0f})"
+
+        # ADX < 20 이면 횡보장 → 평균 회귀 전략 활성화
+        if btc_adx > 0 and btc_adx < 20:
+            strategy_mode = "mean_reversion"
+            reason += f", ADX {btc_adx:.1f} (횡보장→평균회귀)"
+        else:
+            strategy_mode = "momentum"
+            if btc_adx >= 20:
+                reason += f", ADX {btc_adx:.1f}"
+
+        return {"regime": regime, "style": style, "min_score_delta": delta, "reason": reason, "strategy_mode": strategy_mode}
+
+    @staticmethod
+    def _calc_rsi(closes: list[float], period: int = 14) -> float:
+        """closes 리스트에서 단순 RSI 계산 (scan_results 의존성 없음)"""
+        if len(closes) < period + 1:
+            return 50.0
+        deltas = [closes[i] - closes[i - 1] for i in range(-period, 0)]
+        gains = sum(d for d in deltas if d > 0)
+        losses = sum(-d for d in deltas if d < 0)
+        avg_gain = gains / period
+        avg_loss = losses / period
+        if avg_loss == 0:
+            return 100.0
+        return round(100 - 100 / (1 + avg_gain / avg_loss), 2)
+
+    async def _run_regime_detection(self):
+        """
+        BTC 지표 기반 국면 감지. 15분 이내 재호출 차단.
+        규칙 기반 분석은 항상 실행, AI 설정 시 LLM 결과로 보완.
+        국면 변경 시 trading_style / min_score 자동 조정.
+        스캔 이전에 호출되어 올바른 스타일로 스캔하도록 보장.
         """
         import time
-        if not ai_analyst.is_ai_available() or not self.settings.get("ai_regime_detection", True):
+        if not self.settings.get("ai_regime_detection", True):
             return
         if time.time() - self._last_regime_at < 900:   # 15분 이내면 스킵
             return
 
         try:
-            # 실제 BTC OHLCV로 정확한 국면 분석 (단일 API 호출, 15분 캐시로 부담 적음)
             btc_df = await asyncio.wait_for(
                 self._connector.fetch_ohlcv(self._btc_symbol, self.settings["timeframe"], limit=25),
                 timeout=12,
@@ -807,26 +936,52 @@ class AutoTradeBot:
             vol_now  = float(vol_series.iloc[-1])
             btc_volume_ratio = round(vol_now / vol_avg, 2) if vol_avg > 0 else 1.0
 
-            # RSI는 스캔 결과에서 재사용 (이미 계산됨)
-            btc_scan = next((r for r in scan_results if r["symbol"] == self._btc_symbol), None)
-            btc_rsi  = btc_scan.get("rsi", 50.0) if btc_scan else 50.0
+            btc_rsi = self._calc_rsi(btc_closes)
 
-            regime = await ai_analyst.detect_regime(
-                btc_closes=btc_closes,
-                btc_rsi=btc_rsi,
-                btc_volume_ratio=btc_volume_ratio,
-            )
+            # BTC ADX 계산 (횡보장 감지용, TODO 25)
+            btc_adx = 0.0
+            try:
+                import pandas_ta as ta
+                adx_df = ta.adx(btc_df["high"], btc_df["low"], btc_df["close"], length=14)
+                if adx_df is not None and not adx_df.empty:
+                    adx_col = [c for c in adx_df.columns if c.startswith("ADX_")]
+                    if adx_col:
+                        adx_series = adx_df[adx_col[0]].dropna()
+                        if not adx_series.empty:
+                            btc_adx = float(adx_series.iloc[-1])
+            except Exception:
+                pass
+
+            # ── 1단계: 규칙 기반 국면 판단 (항상 실행) ───────────────────────
+            regime = self._detect_regime_rules(btc_closes, btc_rsi, btc_volume_ratio, btc_adx)
+
+            # ── 2단계: AI 보완 (설정 + 사용 가능 시) ─────────────────────────
+            if ai_analyst.is_ai_available():
+                try:
+                    ai_regime = await ai_analyst.detect_regime(
+                        btc_closes=btc_closes,
+                        btc_rsi=btc_rsi,
+                        btc_volume_ratio=btc_volume_ratio,
+                    )
+                    regime = ai_regime  # AI 결과 우선
+                except Exception:
+                    pass  # 규칙 기반 결과 유지
+
             import time as _t
             self._last_regime_at = _t.time()
 
-            old_regime = self._current_regime.get("regime")
-            old_style  = self._current_regime.get("style")
+            old_regime        = self._current_regime.get("regime")
+            old_style         = self._current_regime.get("style")
+            old_strategy_mode = self._current_regime.get("strategy_mode", "momentum")
             self._current_regime = regime
 
-            # 국면 변경 시 설정 자동 조정
-            new_style = regime["style"]
-            delta     = regime["min_score_delta"]
-            changed   = []
+            new_style         = regime["style"]
+            new_strategy_mode = regime.get("strategy_mode", "momentum")
+            delta             = regime["min_score_delta"]
+            changed           = []
+
+            if new_strategy_mode != old_strategy_mode:
+                changed.append(f"전략모드 {old_strategy_mode}→{new_strategy_mode}")
 
             if new_style != self.settings.get("trading_style") and new_style in TRADING_STYLE_PRESETS:
                 self.update_settings({"trading_style": new_style})
@@ -840,17 +995,21 @@ class AutoTradeBot:
 
             if changed or old_regime != regime["regime"]:
                 log_entry = {
-                    "at":     datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
-                    "type":   "regime_change",
-                    "regime": regime["regime"],
-                    "style":  new_style,
-                    "reason": regime["reason"],
+                    "at":      datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+                    "type":    "regime_change",
+                    "regime":  regime["regime"],
+                    "style":   new_style,
+                    "reason":  regime["reason"],
                     "changed": changed,
                 }
                 self._analysis_log.insert(0, log_entry)
                 if len(self._analysis_log) > 20:
                     self._analysis_log.pop()
-                logger.info(f"AutoBot AI 국면 감지: {regime['regime']} {' | '.join(changed) if changed else '변경 없음'}")
+                src = "AI" if ai_analyst.is_ai_available() else "규칙"
+                logger.info(
+                    f"AutoBot 국면 [{src}]: {regime['regime']} "
+                    f"{' | '.join(changed) if changed else '변경 없음'} — {regime['reason']}"
+                )
         except Exception as e:
             logger.debug(f"AutoBot 국면 감지 오류: {e}")
 
@@ -987,6 +1146,11 @@ class AutoTradeBot:
                     current_price = pos.get("current_price") or pos["avg_price"]
                 avg = pos["avg_price"]
 
+                # ── 부분 청산 체크 (TODO 22) ──────────────────────────────────
+                await self._check_partial_exit(symbol, current_price)
+                if symbol not in self._positions:
+                    continue
+
                 # ── 전략 재평가 / 교체 ───────────────────────────────────────
                 new_scan = scan_map.get(symbol)
                 # 포지션별 스타일 우선 (AI가 선택한 값), 없으면 글로벌
@@ -1081,31 +1245,36 @@ class AutoTradeBot:
                                 self._analysis_log.pop()
                             logger.info(f"AutoBot AI SL 상향 {symbol}: {new_sl:,.0f}₩ ({exit_ai['reason']})")
 
-                # ── 자동 물타기 ──────────────────────────────────────────────
+                # ── 자율 판단: 물타기 / 추매 / 피라미딩 ─────────────────────
+                # 고정 임계값 대신 현재 신호 강도와 점수로 시점 판단
+                scan = next((r for r in (scan_results or []) if r["symbol"] == symbol), None)
+                balance = self._broker.balance.get(self._quote_currency, 0)
+
                 if (
                     self.settings["auto_avg_down"]
                     and pos["avg_down_count"] < self.settings["max_avg_down"]
-                    and current_price <= avg * (1 - self.settings["avg_down_threshold_pct"] / 100)
-                    and self._broker.balance.get(self._quote_currency, 0) >= 5_000
+                    and pnl_pct < 0
+                    and balance >= 5_000
+                    and self._should_avg_down(pos, current_price, scan)
                 ):
                     await self._add_to_position(symbol, "avg_down", current_price)
 
-                # ── 자동 추매 ────────────────────────────────────────────────
                 elif (
                     self.settings["auto_add"]
                     and pos["add_count"] < self.settings["max_add"]
-                    and current_price >= avg * (1 + self.settings["add_threshold_pct"] / 100)
-                    and self._broker.balance.get(self._quote_currency, 0) >= 5_000
+                    and pnl_pct > 0
+                    and balance >= 5_000
+                    and self._should_add(pos, current_price, scan)
                 ):
                     await self._add_to_position(symbol, "add", current_price)
 
-                # ── 피라미딩 ─────────────────────────────────────────────────
                 elif (
                     self.settings.get("pyramid_enabled", False)
                     and pos.get("pyramid_count", 0) < self.settings.get("max_pyramid", 2)
-                    and self._broker.balance.get(self._quote_currency, 0) >= 5_000
+                    and balance >= 5_000
+                    and self._should_pyramid(pos, scan)
                 ):
-                    await self._check_pyramid_entry(symbol, current_price, scan_results)
+                    await self._pyramid_into_position(symbol, current_price)
 
             except Exception as e:
                 logger.warning(f"AutoBot: _check_positions {symbol}: {e}")
@@ -1144,11 +1313,33 @@ class AutoTradeBot:
                     and candidate.get("price_change_pct", 0.0) >= 3.0
                 )
 
+                # ── 평균 회귀 모드 분기 (TODO 25) ────────────────────────────
+                strategy_mode = self._current_regime.get("strategy_mode", "momentum")
+                if strategy_mode == "mean_reversion" and not is_surge:
+                    mr_score = candidate.get("mr_score", 0)
+                    if mr_score < 30:
+                        continue  # MR 신호 부족 → 스킵
+                    # BB 중간선을 TP로, 고정 SL 1.5% 적용
+                    bb_mid = candidate.get("bb_mid", 0.0)
+                    price  = candidate.get("price", 0.0)
+                    if bb_mid > price > 0:
+                        candidate = dict(candidate)
+                        candidate["tp_pct"]          = round((bb_mid - price) / price * 100, 2)
+                        candidate["sl_pct"]          = 1.5
+                        candidate["strategy_type"]   = "mean_reversion"
+                        candidate["strategy_label"]  = "평균회귀"
+                        candidate["signals"]         = candidate.get("mr_signals", []) + candidate.get("signals", [])
+                        candidate["score"]           = mr_score
+
                 # ── 멀티 타임프레임 확인 ─────────────────────────────────────
                 # 상위봉 bearish 추세 시 min_score +10 (급등 오버라이드 예외)
                 mtf_confirmed = candidate.get("mtf_confirmed", True)
                 mtf_penalty = 0 if (mtf_confirmed or is_surge) else 10
-                min_score_for_entry = (50 if is_surge else self.settings["min_score"]) + mtf_penalty
+
+                if strategy_mode == "mean_reversion" and not is_surge:
+                    min_score_for_entry = 30  # MR 모드: mr_score 30 이상이면 진입
+                else:
+                    min_score_for_entry = (50 if is_surge else self.settings["min_score"]) + mtf_penalty
 
                 if candidate["score"] < min_score_for_entry:
                     continue
@@ -1160,6 +1351,18 @@ class AutoTradeBot:
                 if total >= 3 and perf["wins"] / total < 0.30:
                     logger.debug(f"AutoBot: 전략 {st} 승률 낮아 스킵 {symbol}")
                     continue
+
+                # ── 포트폴리오 상관관계 체크 (TODO 10) ──────────────────────
+                if self._positions and self._close_cache:
+                    corr_ok, corr_reason = self._portfolio_risk.check_correlation(
+                        new_symbol=symbol,
+                        open_positions=list(self._positions.keys()),
+                        close_cache=self._close_cache,
+                        threshold=self.settings.get("correlation_threshold", 0.85),
+                    )
+                    if not corr_ok:
+                        logger.info(f"AutoBot 상관관계 차단 {symbol}: {corr_reason}")
+                        continue
 
                 # AI 진입 확인 (AI 미설정 또는 기능 OFF 시 바이패스)
                 size_multiplier = 1.0
@@ -1213,8 +1416,8 @@ class AutoTradeBot:
                     if len(self._analysis_log) > 20:
                         self._analysis_log.pop()
                 else:
-                    # AI 포지션별 매매 스타일 선택 (AI 미설정 시 글로벌 스타일 유지)
-                    position_style = style
+                    # 규칙 기반 종목별 스타일 결정 → AI 있으면 AI가 덮어씀
+                    position_style = self._choose_style_rules(candidate)
                     if ai_analyst.is_ai_available() and self.settings.get("ai_entry_validation", True):
                         style_result = await ai_analyst.choose_position_style(
                             symbol=symbol,
@@ -1230,6 +1433,33 @@ class AutoTradeBot:
                 await asyncio.sleep(0.3)
         except Exception as e:
             logger.error(f"AutoBot: enter_from_scan error: {e}", exc_info=True)
+
+    def _choose_style_rules(self, candidate: dict) -> str:
+        """
+        종목별 규칙 기반 최적 매매 스타일 선택 (AI 없이도 동적 결정).
+        글로벌 스타일을 기본으로 하되, 해당 코인 신호에 따라 조정.
+        """
+        rsi     = candidate.get("rsi", 50.0)
+        signals = candidate.get("signals", [])
+        score   = candidate.get("score", 0)
+        global_style = self.settings.get("trading_style", "short")
+
+        # 과열/과매도 → scalping (단기 반전 狙い)
+        if rsi > 75 or rsi < 28:
+            return "scalping"
+
+        # 강한 모멘텀 복합 신호 + 높은 점수 → mid (추세 추종)
+        strong_kw = ("MACD 골든크로스", "거래량 급증", "골든크로스", "강한 상승추세")
+        strong_count = sum(1 for s in signals if any(kw in s for kw in strong_kw))
+        if strong_count >= 2 and score >= 70:
+            return "mid"
+
+        # 단일 강신호 + 괜찮은 점수 → short (기본 단타)
+        if strong_count >= 1 and score >= 60:
+            return "short"
+
+        # 약한 신호 → 글로벌 스타일 유지
+        return global_style
 
     # ── 최초 진입 ────────────────────────────────────────────────────────────
 
@@ -1335,6 +1565,96 @@ class AutoTradeBot:
             logger.info(f"AutoBot: 진입 {symbol} @ {price:,.0f} ₩  수량={amount:.6f}  점수={scan_result.get('score',0)}")
         except Exception as e:
             logger.error(f"AutoBot: 진입 실패 {symbol}: {e}")
+
+    # ── 자율 판단: 물타기 / 추매 / 피라미딩 ─────────────────────────────────
+
+    def _should_avg_down(self, pos: dict, current_price: float, scan: dict | None) -> bool:
+        """
+        물타기 자율 판단.
+        스캔 결과의 신호 강도에 따라 임계값을 동적으로 조정:
+        - 반등 신호 강함 + 점수 유효 → 임계값 50% 완화 (더 일찍 진입)
+        - 점수 붕괴 (min_score * 0.6 미만) → 차단 (추세 붕괴 방어)
+        - 스캔 없음 → 설정 임계값 그대로 적용
+        """
+        avg = pos["avg_price"]
+        drop_pct = (avg - current_price) / avg * 100
+        threshold = self.settings["avg_down_threshold_pct"]
+
+        if scan is None:
+            return drop_pct >= threshold
+
+        score = scan["score"]
+        signals = scan.get("signals", [])
+        min_score = self.settings["min_score"] + self._current_regime.get("min_score_delta", 0)
+
+        # 점수 붕괴: 추세가 무너진 것으로 판단 → 물타기 차단
+        if score < min_score * 0.6:
+            return False
+
+        # 반등 신호 감지
+        reversal_kw = ("과매도", "반등", "골든크로스", "BB 하단")
+        has_reversal = any(any(kw in s for kw in reversal_kw) for s in signals)
+
+        if has_reversal and score >= min_score:
+            # 강한 반등 신호 → 임계값 절반만 내려와도 실행
+            return drop_pct >= threshold * 0.5
+
+        # 점수 살아있음 → 기본 임계값 유지
+        return drop_pct >= threshold and score >= min_score * 0.8
+
+    def _should_add(self, pos: dict, current_price: float, scan: dict | None) -> bool:
+        """
+        추매 자율 판단.
+        - 강한 모멘텀 신호 → 임계값 50% 완화 (더 일찍 추가 매수)
+        - 신호 약하면 기본 임계값 적용
+        """
+        avg = pos["avg_price"]
+        rise_pct = (current_price - avg) / avg * 100
+        threshold = self.settings["add_threshold_pct"]
+
+        if scan is None:
+            return rise_pct >= threshold
+
+        score = scan["score"]
+        signals = scan.get("signals", [])
+        min_score = self.settings["min_score"] + self._current_regime.get("min_score_delta", 0)
+
+        momentum_kw = ("MACD 골든크로스", "거래량 급증", "골든크로스", "상승추세")
+        has_momentum = any(any(kw in s for kw in momentum_kw) for s in signals)
+
+        if has_momentum and score >= min_score + 5:
+            # 강한 모멘텀 → 임계값 절반만 올라와도 추매
+            return rise_pct >= threshold * 0.5
+
+        return rise_pct >= threshold and score >= min_score
+
+    def _should_pyramid(self, pos: dict, scan: dict | None) -> bool:
+        """
+        피라미딩 자율 판단.
+        - 강한 신호 → 수익률 임계값 70%에서 진입 허용
+        - 매우 강한 신호(MACD·거래량 복합) → 더 적극적으로
+        """
+        pnl_pct = pos.get("unrealized_pnl_pct", 0.0)
+        threshold = self.settings.get("pyramid_threshold_pct", 3.0)
+
+        if scan is None:
+            return pnl_pct >= threshold
+
+        score = scan["score"]
+        signals = scan.get("signals", [])
+        min_score = self.settings["min_score"] + self._current_regime.get("min_score_delta", 0)
+
+        strong_kw = ("MACD 골든크로스", "거래량 급증", "골든크로스")
+        strong_count = sum(1 for s in signals if any(kw in s for kw in strong_kw))
+
+        if strong_count >= 2 and score >= min_score + 10:
+            # 복합 강신호 → 임계값 60%에서 피라미딩
+            return pnl_pct >= threshold * 0.6
+        if strong_count >= 1 and score >= min_score + 5:
+            # 단일 강신호 → 임계값 80%에서 피라미딩
+            return pnl_pct >= threshold * 0.8
+
+        return pnl_pct >= threshold and score >= min_score
 
     # ── 추가 매수 (물타기 / 추매) ────────────────────────────────────────────
 
@@ -1487,6 +1807,83 @@ class AutoTradeBot:
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "message": str(e)}
+
+    # ── 부분 청산 (TODO 22) ────────────────────────────────────────────────
+
+    async def _check_partial_exit(self, symbol: str, price: float):
+        """
+        부분 청산 전략 (TODO 22).
+        avg→TP 거리의 partial_exit_trigger_pct 도달 시 포지션의
+        partial_exit_ratio 만큼 매도 후:
+          - SL을 진입가 + 0.5%로 상향 (원금 보호)
+          - 트레일링 스탑 즉시 활성화 (나머지 물량으로 추가 수익 추구)
+          - partial_exited = True 플래그 → 중복 발동 방지
+        """
+        if not self.settings.get("partial_exit_enabled"):
+            return
+        pos = self._positions.get(symbol)
+        if pos is None or pos.get("partial_exited"):
+            return
+
+        avg = pos["avg_price"]
+        tp  = pos["take_profit_price"]
+
+        # TP 상한이 제거된 상태(trailing_active=True)이거나 손실 중이면 스킵
+        if tp == float("inf") or tp <= avg or price <= avg:
+            return
+
+        trigger_pct   = self.settings.get("partial_exit_trigger_pct", 0.6)
+        trigger_price = avg + (tp - avg) * trigger_pct
+        if price < trigger_price:
+            return
+
+        ratio       = self.settings.get("partial_exit_ratio", 0.4)
+        exit_amount = pos["total_amount"] * ratio
+        if exit_amount <= 0:
+            return
+
+        try:
+            exit_order = self._broker.execute_market_order(symbol, "sell", exit_amount, price)
+            exit_fee   = exit_order.get("fee", 0)
+
+            # 부분 청산 손익 계산 (진입 수수료도 비례 차감)
+            entry_fee_partial = pos.get("total_fee_krw", 0) * ratio
+            partial_pnl_krw   = round((price - avg) * exit_amount - entry_fee_partial - exit_fee)
+            partial_pnl_pct   = round(partial_pnl_krw / (avg * exit_amount) * 100, 2) if avg > 0 else 0.0
+
+            # 일일 PnL 기록
+            self._portfolio_risk.record_trade(partial_pnl_krw)
+
+            # 포지션 잔량·수수료 갱신
+            pos["total_amount"]  -= exit_amount
+            pos["total_fee_krw"]  = pos.get("total_fee_krw", 0) * (1.0 - ratio)
+            pos["partial_exited"] = True
+
+            # SL을 진입가 + 0.5%로 상향 (원금 보호)
+            new_sl = avg * 1.005
+            if new_sl > pos["stop_loss_price"]:
+                pos["stop_loss_price"] = new_sl
+
+            # 트레일링 스탑 즉시 활성화, TP 상한 제거
+            pos["trailing_active"]   = True
+            pos["highest_price"]     = max(price, pos.get("highest_price", price))
+            pos["take_profit_price"] = float("inf")
+
+            # 미실현 손익 재계산
+            remaining = pos["total_amount"]
+            remaining_invested = avg * remaining
+            est_exit_fee = price * remaining * self._broker.fee_rate
+            net_pnl = (price - avg) * remaining - pos.get("total_fee_krw", 0) - est_exit_fee
+            pos["unrealized_pnl_krw"] = round(net_pnl)
+            pos["unrealized_pnl_pct"] = round(net_pnl / remaining_invested * 100, 2) if remaining_invested > 0 else 0.0
+
+            logger.info(
+                f"AutoBot 부분 청산 {symbol}: {ratio*100:.0f}% @ {price:,.0f}₩  "
+                f"pnl={partial_pnl_pct:+.2f}%  잔량={remaining:.6f}  "
+                f"SL↑={new_sl:,.0f}₩ → 트레일링 활성화"
+            )
+        except Exception as e:
+            logger.error(f"AutoBot 부분 청산 실패 {symbol}: {e}")
 
     # ── 청산 ─────────────────────────────────────────────────────────────────
 

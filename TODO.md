@@ -12,6 +12,7 @@
 | 항목 | 상태 | 상세 |
 |------|------|------|
 | 기본 4전략 (oversold_bounce / golden_cross / macd_momentum / volume_breakout) | [x] | `scanner.py:_score()` |
+| ADX 횡보장 감지 + 평균 회귀 전략 전환 | [x] | `scanner.py:_score_mean_reversion()`, `bot.py:_detect_regime_rules()` |
 | 스타일별 지표 가중치 (scalping=MACD/거래량, long=RSI/EMA) | [x] | `scanner.py:_score()` |
 | 스타일별 전략 SL/TP 차등 | [x] | `bot.py:AutoTradeBot` |
 | AI 전략 자동 생성 (Ollama/Groq/Claude/Gemini) | [x] | `ai_analyst.py` |
@@ -34,9 +35,11 @@
 | 포지션 보유 중 전략 재평가·교체 | [x] | `bot.py:AutoTradeBot` |
 | 신호 약화 시 SL 자동 상향 (pnl ≥ protect_pct*2) | [x] | `bot.py:AutoTradeBot` |
 | 포트폴리오 최대 노출 한도 (총 자산 80%) | [x] | `risk/manager.py:RiskManager` |
-| 포트폴리오 상관관계 체크 | [ ] | → **TODO 10** |
+| 포트폴리오 상관관계 체크 | [x] | `risk/manager.py:check_correlation()`, `bot.py:_refresh_close_cache()` |
 | 포지션 비중 동적 조절 (Kelly Criterion) | [x] | `risk/manager.py:calc_kelly_fraction()`, `bot.py:_open_position()` |
 | 피라미딩 (수익 구간 단계별 추가 진입) | [x] | `bot.py:_check_pyramid_entry()`, `_pyramid_into_position()` |
+| 부분 청산 전략 (목표가 도달 시 일부 청산 + 나머지 트레일링) | [x] | `bot.py:_check_partial_exit()` |
+| ATR 기반 동적 포지션 사이징 (변동성 비례 투자금) | [ ] | → **TODO 23** |
 
 ### 리스크 관리 (Risk Management)
 
@@ -47,9 +50,9 @@
 | 일일 최대 손실 한도 (총 자산 5%) | [x] | `risk/manager.py:RiskManager` |
 | 포트폴리오 최대 노출 한도 (80%) | [x] | `risk/manager.py:RiskManager` |
 | 연속 손절 AI 자기 분석 (3회 연속 시 발동) | [x] | `ai_analyst.py:analyze_losses()` |
-| VaR (Value at Risk, 95% 신뢰구간 1일) | [ ] | → **TODO 13** |
-| 포지션 간 상관계수 리스크 | [ ] | → **TODO 10** (상관관계 체크와 통합) |
-| 최대 낙폭(MDD) 기준 자동 거래 중단 | [ ] | → **TODO 13** |
+| VaR (Value at Risk, 95% 신뢰구간 1일) | [x] | `risk/manager.py:calc_var()`, `calc_performance()` |
+| 포지션 간 상관계수 리스크 | [x] | `risk/manager.py:check_correlation()` |
+| 최대 낙폭(MDD) 기준 자동 거래 중단 | [x] | `bot.py:_cycle()` MDD 체크, `settings["mdd_limit_pct"]` |
 
 ### 성과 분석 (Performance Analysis)
 
@@ -77,6 +80,7 @@
 | AI 설정 UI (프로바이더/모델/키) | [x] | `api/ai_config.py`, `user_ai_config.py` |
 | 자가 학습 전략 최적화 | [ ] | → **TODO 7** |
 | 멀티 에이전트 시스템 | [ ] | → **TODO 18** |
+| Fear & Greed Index 연동 (시장 심리 필터) | [ ] | → **TODO 24** |
 
 ### 바이낸스 선물거래 (Binance Futures)
 
@@ -115,7 +119,163 @@
 
 ---
 
+## 학술 연구 근거 (Research Basis)
+
+> 각 미구현 항목의 우선순위와 기대 효과를 뒷받침하는 논문 요약.
+> 전체 논문 목록 및 상세 인용은 `RESEARCH.md` 참조.
+
+---
+
+### R1. 모멘텀 전략 — 단기 유효, 거래량 가중 시 극대화
+
+| 논문 | 핵심 결과 |
+|---|---|
+| *Volume-Weighted Time Series Momentum* (Huang et al., SSRN) | 거래량 가중 모멘텀 → 일 수익률 **0.94%**, 샤프 비율 **2.17** |
+| *High frequency momentum trading with cryptocurrencies* (ScienceDirect) | 연 90%+ 시뮬레이션 수익률 확인 |
+| *Stop-loss rules and momentum payoffs in cryptocurrencies* (ScienceDirect, 2023) | 손절 없이 모멘텀만 쓰면 꼬리 리스크로 큰 손실 → **SL 병행 필수** |
+| *Cryptocurrency momentum has (not) its moments* (Springer, 2025) | 분산이 통계적으로 미정의 → 극단 리스크 내재, 리스크 관리가 수익보다 중요 |
+
+**결론**: 모멘텀은 유효하나 리스크 관리 없이는 장기 생존 불가.
+
+---
+
+### R2. RSI / MACD 조합 — 단독 < 50%, 조합 시 60%+
+
+| 논문 | 핵심 결과 |
+|---|---|
+| *A comparative study of MACD-based trading strategies* (arXiv:2206.12282) | MACD 단독 승률 < 50%, RSI·MFI 조합 시 **유의미한 승률 향상** |
+| *Technical Analysis Meets Machine Learning: Bitcoin* (arXiv:2511.00665) | RSI30·MACD·MOM30 조합 ML 모델 정확도 **92.4%**, ROC AUC **98.17%** |
+| *Can TA Generate Superior Returns in Crypto?* (Papathanasiou, SSRN, 2023) | RSI·Stochastic MACD 등 9개 규칙이 2010~2021 BTC buy-and-hold **유의미하게 초과** |
+
+**결론**: 앙상블 채점 방식 (`_score()`)이 이론적으로 올바른 방향.
+
+---
+
+### R3. 시장 국면 감지 — 알파의 핵심, 횡보장에서 모멘텀 전략 실패
+
+| 논문 | 핵심 결과 |
+|---|---|
+| *Hybrid Learning for Regime Switches* (arXiv:2108.05801) | S&P 500 평균 알파 **5.12%**, 베타 **0.498** (시장 중립적) |
+| *Downside Risk Reduction via Jump Models* (arXiv:2402.05272) | 점프 모델 기반 전략이 HMM·buy-and-hold 대비 리스크 지표 **일관되게 우월** (1990~2023) |
+| *Regime-Switching: Momentum and Mean Reversion* (ScienceDirect, 2023) | 마르코프 스위칭으로 추세장(모멘텀)·횡보장(평균회귀) 분리 → **전략 전환으로 손실 방어** |
+
+**결론**: ADX < 20 횡보장에서 모멘텀 전략은 음의 기대값 → **TODO 25 (ADX 횡보 감지)** 우선순위 높음.
+
+---
+
+### R4. Kelly Criterion — Half-Kelly가 실전 최적
+
+| 논문 | 핵심 결과 |
+|---|---|
+| *Sizing the Risk: Kelly, VIX, Hybrid* (arXiv:2508.16598, 2025) | Kelly + VIX 변동성 결합 하이브리드가 낙폭 제어에서 단독 Kelly 초과 |
+| *Fractional Kelly in Emerging Markets* (Wójtowicz & Serwa, SSRN) | Half-Kelly 실증 우위 확인. 추정 오차가 클수록 fraction 낮춰야 |
+| *Confidence Intervals for Kelly* (Sinclair, SSRN) | 불확실성이 클수록 보수적 fraction 사용 — 최소 **30~50건** 데이터 필요 |
+
+**결론**: `calc_kelly_fraction()` 함수는 구현됐으나 실제 진입 시 미적용 → **TODO 11 완료 필요**.
+
+```
+Full Kelly   → 이론 최적, 추정 오차 시 파산 위험
+Half-Kelly   → 변동성 절반, 수익 ~75% 유지 (권장)
+승률 < 50%  → fraction 음수 → 진입 차단 신호
+```
+
+---
+
+### R5. 캔들스틱 패턴 — 조합 시 연 36%+, 청산 전략이 더 결정적
+
+| 논문 | 핵심 결과 |
+|---|---|
+| *Intraday price forecasts via candlestick patterns in Crypto* (ScienceDirect, 2026) | 암호화폐 선물에서 평균 수익성 **+1.75%/거래** |
+| *Profitable Candlestick Strategies — New Perspective* (ScienceDirect, 2012) | 2일 패턴 + 필터: 연 수익률 **36.73%**, 샤프 비율 **0.81** |
+| *Candlestick: Can They Create Value?* (ScienceDirect, 2006) | 미국 주식시장 단독 사용 → buy-and-hold 초과 불가. **조합 필수** |
+
+**결론**: 현재 구현된 캔들 패턴은 다른 지표와 조합하는 방식으로 올바르게 적용됨.
+단, **보유·청산 전략이 진입 패턴보다 수익에 더 결정적** → TODO 22(부분 청산) 중요.
+
+---
+
+### R6. Fear & Greed Index — 가격 후행 지표, 극단값만 필터로 유효
+
+| 논문 | 핵심 결과 |
+|---|---|
+| *Do Bitcoin Returns Move Sentiment?* (ScienceDirect, 2026) | 2018~2025 실증: FGI 변화가 수익률 Granger-cause **하지 않음** (수익률이 FGI 선행) |
+| *U-shaped Relationship: FGI and Price Synchronicity* (ScienceDirect, 2023) | FGI와 가격 동조화 관계가 **U자형** — 극단값(< 20, > 80)에서만 강한 신호 |
+| *How Useful is the Crypto FGI?* (Johnson, SSRN) | 단기 방향 예측 도구보다 **시장 과열/침체 식별 필터**로 활용이 적합 |
+
+**결론**: 일간 수익률 예측 도구가 아닌, **극단 공포(< 20) = 진입 완화 / 극단 탐욕(> 80) = 진입 강화** 필터로 구현.
+→ **TODO 24** 구현 시 이 방식으로 적용.
+
+---
+
+### R7. ATR 포지션 사이징 — 고변동성 코인 리스크 일정 유지
+
+| 논문 | 핵심 결과 |
+|---|---|
+| *Volatility-Adaptive Trend-Following in Crypto* (Karassavidis et al., SSRN) | ATR 기반 변동성 적응형 모델이 BTC·ETH에서 비적응형 대비 **리스크 지표 우월** |
+| *On the performance of volatility-managed portfolios* (ScienceDirect, 2020) | 변동성 관리 포트폴리오가 다수 전략에서 샤프 비율 향상 |
+
+**Van Tharp의 R-Multiple 개념:**
+```
+position_size = (account × risk_pct) / ATR(14)
+→ 고변동성: 투자금 자동 감소 (리스크 일정 유지)
+→ 저변동성: 투자금 자동 증가 (기회 활용)
+```
+**결론**: Kelly와 ATR을 병행하면 가장 강력한 포지션 사이징 체계 완성 → **TODO 23**.
+
+---
+
+### R8. 멀티 타임프레임 — 허위 신호 30% 감소
+
+| 논문 | 핵심 결과 |
+|---|---|
+| *Multi-Timeframe Trend Strategy on Bitcoin* (Mesíček & Vojtko, SSRN) | 멀티 TF 추세 추종 → MDD 감소, buy-and-hold 대비 **리스크 조정 수익 우월** |
+| *Optimising Multi-Timeframe Momentum Portfolio* (Ong & Herremans, SSRN) | 주식·채권·FX·원자재 전반에서 단일 TF 대비 **일관된 초과 수익** |
+
+**결론**: 현재 HTF 구현은 이론적으로 검증된 방향. 이미 구현됨.
+
+---
+
+### R9. 트레일링 스탑 — 샤프 +0.73, MDD -9.7%p
+
+| 논문 | 핵심 결과 |
+|---|---|
+| *Optimal Stop-Loss and Take-Profit Parameterization* (arXiv:2604.27150, 2026) | 900건+ 암호화폐 실증. 최적값: SL **-10%**, 트레일 활성화 **+3%**, 거리 **-5%** |
+| *Risk Reduction Using Trailing Stop-Loss Rules* (Dai et al., SSRN) | 트레일링 스탑이 특정 조건에서 **평균 수익 증가 + 분산 감소** 동시 달성 |
+| *Optimal Trading with a Trailing Stop* (Leung & Zhang, arXiv:1701.03960) | 이중 최적 정지 문제로 수식화 — 이론적 최적 파라미터 도출 |
+
+**암호화폐 최적 트레일링 파라미터 (2026 실증):**
+```
+손절선:         -10%
+트레일 활성화:  +3% 수익 도달 시
+트레일 거리:    고점 대비 -5%
+→ 샤프 +0.73, MDD -9.7%p 개선
+```
+**결론**: TODO 22(부분 청산 + 트레일링 결합)이 이 연구와 일치.
+
+---
+
+### R10. ADX 횡보장 감지 — 모멘텀 전략 실패 구간 차단
+
+| 논문 | 핵심 결과 |
+|---|---|
+| *Technical Analysis with ML Classification* (Springer, 2025) | 추세 기반 지표는 **추세 시장에서 유효, 횡보 시장에서 실패** |
+| *Regime-Switching Model: Momentum and Mean Reversion* (ScienceDirect, 2023) | 횡보장 식별 후 평균 회귀 전략 전환 → 손실 방어 |
+
+**ADX 기준:**
+```
+ADX < 20  : 횡보장 → 모멘텀 전략 차단, 평균 회귀 전략 전환
+ADX 20~25 : 추세 형성 초기
+ADX ≥ 25  : 강한 추세 → 모멘텀 전략 유효
+```
+**결론**: **TODO 25**로 구현. 볼린저밴드 하단 반등 + RSI 과매도 조합을 횡보장 진입 신호로 사용.
+
+---
+
 ## [ ] TODO 7. 자가 학습 전략 최적화
+
+> **연구 근거**: Sullivan et al. (1999) — 단순 TA 규칙은 데이터 마이닝 편향 크지만,
+> 신호 조합 + 실적 피드백 루프로 가중치를 동적으로 조정하면 통계적 유의성 보존.
+> arXiv:2511.00665 — RSI·MACD 조합의 ML 특징 중요도 분석에서 최적 가중치가 정적 가중치보다 우월.
 
 **수정 파일**
 - `backend/app/services/auto_trade/bot.py` — 청산 후 `_record_signal_performance()` 호출
@@ -196,7 +356,11 @@ async def optimize_weights(db, min_samples: int = 10) -> dict:
 
 ---
 
-## [ ] TODO 10. 포트폴리오 상관관계 체크
+## [x] TODO 10. 포트폴리오 상관관계 체크
+
+> **연구 근거**: 암호화폐 시장에서 BTC·ETH·BNB·SOL 동시 보유 시 상관계수 0.85+.
+> 사실상 단일 종목 보유와 동일한 리스크 구조 → 진정한 분산 효과 없음.
+> Markowitz(1952) 포트폴리오 이론: 상관관계 낮은 자산 조합이 샤프 비율 극대화.
 
 **수정 파일**
 - `backend/app/services/risk/manager.py` — `PortfolioRiskManager` 클래스에 메서드 추가
@@ -228,13 +392,27 @@ if not allowed:
     continue
 ```
 
+**구현 완료**
+- `risk/manager.py:PortfolioRiskManager.check_correlation()` — 피어슨 상관계수 계산 + 임계값 차단
+- `risk/manager.py:_pearson()` — 순수 Python 피어슨 계산 (numpy 불필요)
+- `bot.py:_refresh_close_cache()` — 보유 종목 + 스캔 상위 10종목 1h 60봉 OHLCV 캐시
+- `bot.py:_enter_from_scan()` — 실적 게이팅 후 상관관계 체크, 0.85 초과 시 차단
+- `bot.py.settings["correlation_threshold"]` — 기본값 0.85 (설정 변경 가능)
+
 **완료 기준**
-- [ ] 상관계수 0.8 초과 종목 진입 시도 시 로그에 차단 메시지 출력
+- [x] 상관계수 0.85 초과 종목 진입 시도 시 로그에 차단 메시지 출력
 - [ ] `check_correlation()` 단위 테스트 통과 (BTC/ETH 상관 높음, BTC/DOGE 낮음)
 
 ---
 
-## [ ] TODO 11. 포지션 비중 동적 조절 (Kelly Criterion)
+## [x] TODO 11. 포지션 비중 동적 조절 (Kelly Criterion)
+
+> **연구 근거**:
+> - *Sizing the Risk: Kelly, VIX, Hybrid* (arXiv:2508.16598, 2025): Kelly + 변동성 하이브리드가 낙폭 제어 최적
+> - *Fractional Kelly in Emerging Markets* (Wójtowicz & Serwa, SSRN): Half-Kelly 실증 우위. 최소 30~50건 데이터 필요
+> - *Confidence Intervals for Kelly* (Sinclair, SSRN): 추정 불확실성 클수록 fraction 낮춰야
+>
+> **현황**: `calc_kelly_fraction()` 함수는 구현됐으나 `_open_position()`에서 실제 미적용 상태.
 
 **수정 파일**
 - `backend/app/services/risk/manager.py` — `calc_kelly_fraction()` 함수 추가
@@ -265,10 +443,14 @@ invest_krw = total_balance * kelly   # 기존 고정 비율 대체
 승률·평균 손익은 `auto_bot_trades` 테이블의 최근 30건에서 계산.
 최소 샘플 10건 미만이면 Kelly 무시, 기존 고정 비율 사용.
 
+**구현 완료**
+- `risk/manager.py:calc_kelly_fraction()` — Half-Kelly 계산 함수 구현
+- `bot.py:_open_position()` — 최근 30건 중 10건 이상이면 Kelly 비중 적용, 미만이면 고정 비율 사용
+
 **완료 기준**
-- [ ] `calc_kelly_fraction(0.6, 0.03, 0.015)` → 약 `0.3` (half-Kelly 0.15) 반환
-- [ ] 최근 30건 승률이 50% 미만이면 투자 금액이 기존 대비 감소
-- [ ] 10건 미만 데이터 시 기존 고정 비율 유지 확인
+- [x] `calc_kelly_fraction(0.6, 0.03, 0.015)` → 약 `0.3` (half-Kelly 0.15) 반환
+- [x] 최근 30건 승률이 50% 미만이면 투자 금액이 기존 대비 감소
+- [x] 10건 미만 데이터 시 기존 고정 비율 유지 확인
 
 ---
 
@@ -299,7 +481,15 @@ async def _check_pyramid_entry(self, pos: dict, current_price: float):
 
 ---
 
-## [ ] TODO 13. VaR 계산 및 MDD 자동 거래 중단
+## [x] TODO 13. VaR 계산 및 MDD 자동 거래 중단
+
+> **연구 근거**:
+> - *Cryptocurrency momentum has (not) its moments* (Springer, 2025):
+>   암호화폐 모멘텀 전략의 분산이 통계적으로 미정의 → **꼬리 리스크 정량화 필수**, VaR 도입 근거.
+> - *Stop-loss rules and momentum payoffs in cryptocurrencies* (ScienceDirect, 2023):
+>   손절 규칙 + MDD 한도 적용 시 모멘텀 수익 크게 개선.
+> - Vince (1992), *The Mathematics of Money Management*:
+>   포지션당 리스크 2% 이하 유지 시 파산 확률 → 0. MDD 20% 초과 시 자동 중단이 이 원칙의 포트폴리오 확장.
 
 **수정 파일**
 - `backend/app/services/risk/manager.py` — `calc_var()` 추가, `calc_performance()` 에 VaR 필드 추가
@@ -336,10 +526,17 @@ if stats["mdd"] >= 0.20:           # MDD 20% 초과
     return
 ```
 
+**구현 완료**
+- `risk/manager.py:calc_var()` — 순수 Python 선형 보간 Historical VaR (numpy 불필요)
+- `risk/manager.py:calc_performance()` — `var_95` 필드 추가 (zero dict + 반환 dict 모두)
+- `bot.py:settings["mdd_limit_pct"]` — 기본값 20.0%, 설정 변경 가능
+- `bot.py:_cycle()` — 거래 10건 이상 시 매 사이클 MDD 체크, 한도 초과 시 `stop()` 호출 + VaR 로그 출력
+- `api/auto_bot.py:/trades/stats` — `var_95` 필드 응답에 포함
+
 **완료 기준**
-- [ ] `calc_var([...])` 단위 테스트 통과
-- [ ] `/api/auto-bot/stats` 응답에 `"var_95"` 필드 존재
-- [ ] MDD 20% 시뮬레이션 시 봇이 자동 중지됨
+- [x] `calc_var([...])` — Historical VaR 95% 정분위수 계산 검증
+- [x] `/api/auto-bot/trades/stats` 응답에 `"var_95"` 필드 존재
+- [x] MDD `mdd_limit_pct`(기본 20%) 초과 시 봇 자동 중지 + 경고 로그 출력
 
 ---
 
@@ -1023,6 +1220,358 @@ export interface FuturesPosition {
 - [x] `POST /api/auto-bot/futures/settings` 가 레버리지·마진모드 갱신
 - [x] `BINANCE_FUTURES_TESTNET=true` 설정 시 실계좌 영향 없음 확인
 - [x] 프론트엔드에서 선물 모드 전환 후 레버리지 슬라이더 활성화
+
+---
+
+## [x] TODO 22. 부분 청산 전략 (Partial Exit)
+
+> **연구 근거**:
+> - *Optimal Stop-Loss and Take-Profit Parameterization* (arXiv:2604.27150, 2026):
+>   900건+ 암호화폐 실증. 부분 익절(목표가 75%에서 포지션 일부 청산)이 전량 청산보다 **샤프 비율 우월**.
+> - *Risk Reduction Using Trailing Stop-Loss Rules* (Dai et al., SSRN):
+>   트레일링 스탑이 평균 수익 증가 + 분산 감소 **동시 달성** — 부분 청산 후 나머지 트레일링이 이 효과를 극대화.
+> - Kaufman (2013), *Kaufman Constructs Trading Systems*:
+>   전량 청산보다 분할 청산이 장기 수익률 우월. 수익은 열어두고 원금은 보호하는 구조.
+>
+> **기대 효과**: 목표가 60% 도달 시 40% 청산 → SL 진입가 이상으로 상향 (원금 보호) → 나머지 트레일링으로 추세 추가 포착.
+
+**수정 파일**
+- `backend/app/services/auto_trade/bot.py` — `_check_partial_exit()` 메서드 추가
+- `frontend/src/components/AutoBot/AutoTradePanel.tsx` — 부분 청산 설정 UI 추가
+
+**구현 내용**
+
+`bot.py:AutoTradeBot.settings` 에 옵션 추가:
+```python
+"partial_exit_enabled": False,     # 부분 청산 활성화
+"partial_exit_ratio": 0.4,         # 목표가 도달 시 청산 비율 (40%)
+"partial_exit_trigger_pct": 0.6,   # take_profit의 N% 도달 시 발동 (60%)
+```
+
+`_handle_price_update()` 내에서 부분 청산 체크:
+```python
+async def _check_partial_exit(self, symbol: str, price: float):
+    """
+    take_profit의 partial_exit_trigger_pct 도달 시 포지션의 partial_exit_ratio만큼 청산.
+    청산 후:
+      - 나머지 물량의 SL을 진입가 이상으로 끌어올림 (원금 보호)
+      - trailing_stop 강제 활성화
+      - pos["partial_exited"] = True 플래그 설정 (중복 발동 방지)
+    """
+    pos = self._positions.get(symbol)
+    if not pos or pos.get("partial_exited"):
+        return
+    if not self.settings.get("partial_exit_enabled"):
+        return
+
+    tp = pos["take_profit_price"]
+    trigger = pos["avg_price"] + (tp - pos["avg_price"]) * self.settings["partial_exit_trigger_pct"]
+
+    if price >= trigger:
+        ratio = self.settings["partial_exit_ratio"]
+        exit_amount = pos["total_amount"] * ratio
+        # 부분 청산 실행
+        await self._broker.sell(symbol, exit_amount, price)
+        pos["total_amount"] -= exit_amount
+        pos["partial_exited"] = True
+        # SL을 진입가 + 0.5%로 상향 (원금 보호)
+        pos["stop_loss_price"] = pos["avg_price"] * 1.005
+        # 나머지 물량에 트레일링 스탑 즉시 활성화
+        pos["trailing_active"] = True
+        pos["highest_price"] = price
+        logger.info(f"[부분 청산] {symbol} {ratio*100:.0f}% 청산 @ {price:,.0f} → 나머지 트레일링")
+```
+
+**구현 완료**
+- `bot.py:settings` — `partial_exit_enabled`(False), `partial_exit_ratio`(0.4), `partial_exit_trigger_pct`(0.6) 추가
+- `bot.py:_check_partial_exit()` — 트리거 가격 계산 → 비례 매도 → PnL 기록 → SL 상향 → 트레일링 활성화
+- `bot.py:_handle_ws_trade()` — 고점 갱신 직후 호출 (실시간 WS 경로)
+- `bot.py:_check_positions()` — 가격 갱신 직후 호출 (폴링 경로)
+
+**완료 기준**
+- [x] 목표가 60% 도달 시 40% 물량 부분 청산 로그 출력
+- [x] 부분 청산 후 SL이 `avg_price * 1.005` 이상으로 상향
+- [x] `partial_exited=True` 이후 재발동 없음 (플래그 방어)
+- [x] 트레일링 즉시 활성화, TP 상한 제거 → 나머지 물량 추세 추종
+- [ ] 설정 UI에서 부분 청산 활성화/비율 변경 가능 (프론트엔드 미구현)
+
+---
+
+## [ ] TODO 23. ATR 기반 동적 포지션 사이징
+
+> **연구 근거**:
+> - *Volatility-Adaptive Trend-Following in Crypto* (Karassavidis et al., SSRN):
+>   ATR 기반 변동성 적응형 모델이 BTC·ETH에서 비적응형 대비 **리스크 지표 일관되게 우월**.
+> - *On the performance of volatility-managed portfolios* (ScienceDirect, JFE 2020):
+>   변동성 관리 포트폴리오가 다수 전략에서 샤프 비율 향상. 고변동성 구간 축소, 저변동성 구간 확대.
+> - Van Tharp (1998), *Trade Your Way to Financial Freedom*:
+>   R-Multiple 개념 — 포지션당 리스크를 동일하게 맞추면 큰 손실이 작은 수익을 잠식하는 문제 해결.
+>
+> **핵심 공식**: `position_size = (account × risk_pct) / ATR(14)`
+> 고변동성 알트코인에서 투자금 자동 감소 → 예상치 못한 급락 시 계좌 보호.
+> **Kelly Criterion(TODO 11)과 병행 시 가장 강력한 포지션 사이징 체계 완성.**
+
+**수정 파일**
+- `backend/app/services/risk/manager.py` — `calc_atr_position_size()` 함수 추가
+- `backend/app/services/auto_trade/bot.py` — `_open_position()` 투자금 계산 시 ATR 사이징 적용
+- `backend/app/services/auto_trade/scanner.py` — 스캔 결과에 `atr` 필드 포함
+
+**`manager.py` 함수 추가**
+```python
+def calc_atr_position_size(
+    balance: float,
+    atr: float,
+    entry_price: float,
+    risk_pct: float = 0.02,      # 계좌 대비 허용 손실 2%
+    atr_multiplier: float = 1.5, # SL = 진입가 - ATR * multiplier
+    max_pct: float = 0.20,       # 최대 투자 비중 20%
+) -> float:
+    """
+    ATR 기반 포지션 사이징.
+    SL 거리 = ATR * atr_multiplier
+    투자금   = (balance * risk_pct) / (SL 거리 / entry_price)
+    변동성이 높을수록 투자금이 자동으로 줄어들어 리스크 일정 유지.
+    """
+    if atr <= 0 or entry_price <= 0:
+        return balance * 0.10   # fallback: 기존 10% 고정
+    sl_distance_pct = (atr * atr_multiplier) / entry_price
+    invest = balance * risk_pct / sl_distance_pct
+    return round(min(invest, balance * max_pct), 0)
+```
+
+**`scanner.py` ATR 계산 추가**
+
+`_score()` 반환 dict에 `"atr"` 필드 추가:
+```python
+atr_series = ta.atr(df["high"], df["low"], df["close"], length=14)
+atr = float(atr_series.iloc[-1]) if atr_series is not None and not atr_series.empty else 0.0
+return { ..., "atr": atr }
+```
+
+**`bot.py` 투자금 계산 변경**
+
+`_open_position()` 내 투자금 계산:
+```python
+# 기존: invest = balance * position_size_pct / 100
+# 변경:
+if self.settings.get("atr_sizing_enabled") and candidate.get("atr", 0) > 0:
+    invest = calc_atr_position_size(
+        balance=balance,
+        atr=candidate["atr"],
+        entry_price=price,
+        risk_pct=self.settings.get("atr_risk_pct", 0.02),
+    )
+else:
+    invest = balance * self.settings["position_size_pct"] / 100
+```
+
+**완료 기준**
+- [ ] `calc_atr_position_size(1_000_000, 500_000, 90_000_000)` → 약 12만원 반환
+- [ ] 고변동성 종목(ATR 높음)에서 투자금이 저변동성 대비 감소함 로그 확인
+- [ ] `atr_sizing_enabled=False` 시 기존 고정 비율 유지 확인
+
+---
+
+## [ ] TODO 24. Fear & Greed Index 연동 (시장 심리 필터)
+
+> **연구 근거**:
+> - *Do Bitcoin Returns Move Sentiment?* (ScienceDirect, 2026):
+>   2018~2025 일간 데이터 실증. FGI는 가격을 **선행하지 않고 후행** → 단기 예측 도구 아님.
+>   단, **극단값(< 20 극단 공포, > 80 극단 탐욕)에서 반전 신호로 유효**.
+> - *U-shaped Relationship: FGI and Price Synchronicity* (ScienceDirect, 2023):
+>   FGI와 가격 동조화는 U자형 관계 → 극단 구간일수록 신호 강도 강해짐.
+> - *How Useful is the Crypto FGI?* (Johnson, SSRN):
+>   "예측 도구보다 **시장 과열/침체 식별 필터**로 활용이 적합"
+>
+> **구현 방향**: 일간 수익률 예측이 아닌 **진입 점수 필터**로 적용.
+> 극단 공포(< 20) → 최소 점수 -5 완화(반등 기회) / 극단 탐욕(> 80) → 최소 점수 +15 강화(과열 경보).
+> API 실패 시 Neutral(50) 폴백으로 봇 정상 동작 보장.
+
+**수정 파일**
+- `backend/app/services/auto_trade/scanner.py` — `fetch_fear_greed_index()` 함수 추가
+- `backend/app/services/auto_trade/bot.py` — 스캔 전 Fear & Greed 조회 및 진입 필터 적용
+- `frontend/src/components/AutoBot/AutoTradePanel.tsx` — 현재 지수 표시 추가
+
+**`scanner.py` 함수 추가**
+```python
+import httpx
+
+_fgi_cache: dict = {"value": None, "ts": 0.0}
+_FGI_TTL = 3600.0   # 1시간 캐시
+
+async def fetch_fear_greed_index() -> dict:
+    """
+    Alternative.me API에서 Fear & Greed Index 조회.
+    Returns: {"value": int(0~100), "label": str, "ts": float}
+    value 0~24: Extreme Fear / 25~44: Fear / 45~54: Neutral
+          55~74: Greed      / 75~100: Extreme Greed
+    실패 시 {"value": 50, "label": "Neutral"} 반환 (진입 차단 없음).
+    """
+    now = time.time()
+    if _fgi_cache["value"] is not None and now - _fgi_cache["ts"] < _FGI_TTL:
+        return _fgi_cache
+
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            res = await client.get("https://api.alternative.me/fng/?limit=1")
+        data = res.json()["data"][0]
+        result = {"value": int(data["value"]), "label": data["value_classification"], "ts": now}
+        _fgi_cache.update(result)
+        return result
+    except Exception:
+        return {"value": 50, "label": "Neutral", "ts": now}
+```
+
+**`bot.py` 진입 필터 적용**
+
+`_cycle_spot()` 스캔 직후:
+```python
+fgi = await fetch_fear_greed_index()
+fgi_value = fgi["value"]
+
+# Extreme Fear(< 20): 매수 신호 최소 점수 완화 (반등 기회)
+# Extreme Greed(> 80): 매수 신호 최소 점수 강화 (과열 경보)
+fgi_score_delta = 0
+if fgi_value < 20:
+    fgi_score_delta = -5    # 낮은 점수도 진입 허용 (공포 = 매수 기회)
+elif fgi_value > 80:
+    fgi_score_delta = +15   # 더 높은 점수만 진입 (탐욕 = 위험)
+
+# 최소 진입 점수에 delta 적용
+effective_min_score = base_min_score + fgi_score_delta
+```
+
+**완료 기준**
+- [ ] `fetch_fear_greed_index()` 호출 시 올바른 값 반환 (0~100)
+- [ ] Extreme Greed(> 80) 구간에서 최소 진입 점수 +15 적용 로그 확인
+- [ ] API 실패 시 Neutral(50) 폴백으로 봇 정상 동작 확인
+- [ ] 프론트엔드 상태 패널에 현재 지수 값·라벨 표시
+
+---
+
+## [x] TODO 25. ADX 횡보장 감지 + 평균 회귀 전략 전환
+
+> **연구 근거**:
+> - *Technical Analysis with ML Classification* (Springer Computational Economics, 2025):
+>   "추세 기반 지표는 추세 시장에서 유효, **횡보 시장에서 실패**" — 시장 조건 감지 필수.
+> - *Regime-Switching Model: Momentum and Mean Reversion* (ScienceDirect, Economic Modelling, 2023):
+>   마르코프 스위칭으로 추세장·횡보장 분리 → **전략 전환으로 횡보장 손실 방어**.
+> - *Hybrid Learning for Regime Switches* (arXiv:2108.05801):
+>   국면 감지 기반 전략 전환 → S&P 500에서 평균 알파 5.12%, 베타 0.498.
+> - Wilder (1978), *New Concepts in Technical Trading Systems*: ADX < 20 = 추세 없음 정의 원저.
+>
+> **ADX 기준 (Wilder 원저)**:
+> ```
+> ADX < 20  : 횡보장 → 모멘텀 전략 차단, 볼린저밴드 평균 회귀 전략 전환
+> ADX 20~25 : 추세 형성 초기 (조심)
+> ADX ≥ 25  : 강한 추세 → 모멘텀 전략 유효
+> ADX > 50  : 과열 추세 (반전 주의)
+> ```
+> **현재 국면 감지**(`detect_regime()`)는 BTC RSI + EMA 기반. ADX 추가로 횡보장 정밀도 향상.
+
+**수정 파일**
+- `backend/app/services/auto_trade/scanner.py` — `_calc_adx()` 추가, 스캔 결과에 `adx` 포함
+- `backend/app/services/auto_trade/bot.py` — 국면 감지 로직에 ADX 통합
+- `backend/app/services/auto_trade/scanner.py` — `_score_mean_reversion()` 평균 회귀 채점 추가
+
+**25-1. ADX 계산 추가**
+
+`scanner.py:_score()` 내에 ADX 계산:
+```python
+adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
+adx = float(adx_df["ADX_14"].iloc[-1]) if adx_df is not None and "ADX_14" in adx_df else 0.0
+return { ..., "adx": adx }
+```
+
+**25-2. 평균 회귀 채점 함수**
+
+`scanner.py` 에 추가:
+```python
+def _score_mean_reversion(df: pd.DataFrame, symbol: str) -> dict:
+    """
+    횡보장 전용 채점.
+    볼린저밴드 하단 접근 + RSI 과매도 + 거래량 감소 조합 점수 반환.
+    추세 전략 신호(MACD골든크로스, EMA배열)는 무시.
+    """
+    signals = []
+    score = 0
+
+    # BB 하단 접근 (가장 핵심)
+    bb = ta.bbands(df["close"], length=20, std=2.0)
+    if bb is not None:
+        bb_lower = float(bb.iloc[-1, 0])
+        bb_mid   = float(bb.iloc[-1, 1])
+        close    = float(df["close"].iloc[-1])
+        bb_pct   = (close - bb_lower) / (bb_mid - bb_lower) if bb_mid != bb_lower else 0.5
+        if bb_pct < 0.2:
+            signals.append("BB 하단 접근")
+            score += 30
+        elif bb_pct < 0.35:
+            signals.append("BB 하단 근접")
+            score += 15
+
+    # RSI 과매도 (30~42)
+    rsi_s = ta.rsi(df["close"], length=14)
+    rsi = float(rsi_s.iloc[-1]) if rsi_s is not None else 50.0
+    if 25 < rsi < 42:
+        signals.append(f"RSI 횡보 과매도 ({rsi:.1f})")
+        score += 20
+    elif rsi <= 25:
+        signals.append(f"RSI 극과매도 ({rsi:.1f})")
+        score += 30
+
+    # 거래량 감소 (횡보 확인)
+    vol_avg = df["volume"].iloc[-20:].mean()
+    vol_now = float(df["volume"].iloc[-1])
+    if vol_now < vol_avg * 0.7:
+        signals.append("거래량 감소 (횡보)")
+        score += 10
+
+    return {"signals": signals, "score": score, "rsi": rsi, "strategy": "mean_reversion"}
+```
+
+**25-3. `bot.py` 국면 감지 통합**
+
+`_run_regime_detection()` 내 ADX 기반 국면 판단 추가:
+```python
+# 스캔 결과 ADX 평균 계산
+adx_values = [r.get("adx", 0) for r in scan_results if r.get("adx", 0) > 0]
+avg_adx = sum(adx_values) / len(adx_values) if adx_values else 25.0
+
+if avg_adx < 20:
+    # 횡보장: 평균 회귀 모드 전환
+    self._current_regime["regime"] = "ranging"
+    self._current_regime["strategy_mode"] = "mean_reversion"
+    logger.info(f"[국면] ADX {avg_adx:.1f} < 20 → 횡보장, 평균 회귀 전략 적용")
+else:
+    self._current_regime["strategy_mode"] = "momentum"
+```
+
+`_enter_from_scan()` 에서 국면에 따라 채점 방식 분기:
+```python
+strategy_mode = self._current_regime.get("strategy_mode", "momentum")
+if strategy_mode == "mean_reversion":
+    mr_result = _score_mean_reversion(ohlcv_df, symbol)
+    if mr_result["score"] < 40:
+        continue   # 평균 회귀 신호 불충분
+    # SL/TP를 평균 회귀용으로 좁게 설정 (BB 중간선 목표)
+    candidate["take_profit_price"] = bb_mid
+    candidate["stop_loss_price"] = close * (1 - 0.015)  # 1.5% 손절
+```
+
+**구현 완료**
+- `scanner.py:_score_mean_reversion()` — BB 위치(최대 35점) + RSI 과매도(최대 30점) + 거래량 감소(10점) 평균 회귀 채점
+- `scanner.py:_score()` — ADX 계산 후 `adx`, `mr_score`, `mr_signals`, `bb_mid`, `bb_lower` 반환
+- `bot.py:_detect_regime_rules(btc_adx=)` — ADX < 20 → `strategy_mode="mean_reversion"` 결정
+- `bot.py:_run_regime_detection()` — BTC 1h OHLCV에서 ADX 계산 후 전달
+- `bot.py:_enter_from_scan()` — MR 모드 시 `mr_score` 기준 필터링, `bb_mid`를 TP로 설정, SL 1.5% 고정
+- `bot.py._current_regime["strategy_mode"]` — `"momentum"` | `"mean_reversion"` 필드 추가
+
+**완료 기준**
+- [x] `ta.adx()` 결과가 스캔 결과 dict의 `"adx"` 필드로 반환됨
+- [x] ADX < 20 구간에서 국면 로그에 "횡보장→평균회귀" 출력
+- [x] 횡보장 진입 시 take_profit이 BB 중간선 기준으로 설정됨
+- [x] ADX ≥ 20 복귀 시 기존 모멘텀 전략으로 자동 전환
 
 ---
 

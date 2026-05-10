@@ -367,6 +367,75 @@ def _detect_advanced_patterns(df: pd.DataFrame) -> tuple[list[str], int]:
     return signals, score
 
 
+def _score_mean_reversion(df: pd.DataFrame) -> tuple[list[str], int, float, float]:
+    """
+    평균 회귀 신호 점수화.
+    BB 하단 접근 + RSI 과매도 + 거래량 감소 조합으로 횡보장 매수 진입점 포착.
+    Returns: (signals, score, bb_mid, bb_lower)
+    """
+    signals: list[str] = []
+    score = 0
+    close = df["close"]
+    bb_mid = 0.0
+    bb_lower = 0.0
+
+    # BB 하단 접근 (최대 35점)
+    try:
+        bb = ta.bbands(close, length=20, std=2.0)
+        if bb is not None and not bb.empty:
+            cols = bb.columns.tolist()   # [BBL, BBM, BBU, BBB, BBP]
+            bbl = float(bb[cols[0]].iloc[-1])
+            bbm = float(bb[cols[1]].iloc[-1])
+            bbu = float(bb[cols[2]].iloc[-1])
+            price = float(close.iloc[-1])
+            bb_mid = bbm
+            bb_lower = bbl
+            if bbu > bbl:
+                bb_pos = (price - bbl) / (bbu - bbl)   # 0 = 하단, 1 = 상단
+                if bb_pos <= 0.10:
+                    score += 35
+                    signals.append(f"BB 하단 터치 ({bb_pos:.2f})")
+                elif bb_pos <= 0.20:
+                    score += 22
+                    signals.append(f"BB 하단 접근 ({bb_pos:.2f})")
+                elif bb_pos <= 0.30:
+                    score += 10
+                    signals.append(f"BB 하단 근접 ({bb_pos:.2f})")
+    except Exception:
+        pass
+
+    # RSI 과매도 (최대 30점)
+    try:
+        rsi_s = ta.rsi(close, length=14)
+        if rsi_s is not None and not rsi_s.empty:
+            rsi = float(rsi_s.iloc[-1])
+            if rsi <= 25:
+                score += 30
+                signals.append(f"MR RSI 극과매도 ({rsi:.1f})")
+            elif rsi <= 32:
+                score += 22
+                signals.append(f"MR RSI 강과매도 ({rsi:.1f})")
+            elif rsi <= 40:
+                score += 12
+                signals.append(f"MR RSI 과매도 ({rsi:.1f})")
+    except Exception:
+        pass
+
+    # 거래량 감소 (횡보장 특성, +10점)
+    try:
+        volume = df["volume"]
+        if len(volume) >= 6:
+            recent_avg = float(volume.iloc[-6:-1].mean())
+            vol_now = float(volume.iloc[-1])
+            if recent_avg > 0 and vol_now / recent_avg < 0.7:
+                score += 10
+                signals.append("거래량 감소 (횡보 확인)")
+    except Exception:
+        pass
+
+    return signals, min(score, 75), bb_mid, bb_lower
+
+
 def _daily_volume_krw(df: pd.DataFrame, timeframe: str) -> float:
     """캔들 OHLCV로 일 거래대금(KRW) 추정."""
     tf_min = TIMEFRAME_MINUTES.get(timeframe, 60)
@@ -502,6 +571,20 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         signals.extend(rsi_bounce_signals)
         score += int(rsi_bounce_pts * weights["rsi_bounce"])
 
+        # ── ADX (횡보/추세 강도) ─────────────────────────────────────────
+        adx_val = 0.0
+        try:
+            adx_df = ta.adx(df["high"], df["low"], close, length=14)
+            if adx_df is not None and not adx_df.empty:
+                adx_col = [c for c in adx_df.columns if c.startswith("ADX_")]
+                if adx_col:
+                    adx_val = float(adx_df[adx_col[0]].dropna().iloc[-1])
+        except Exception:
+            pass
+
+        # ── 평균 회귀 점수 계산 ──────────────────────────────────────────
+        mr_signals, mr_score, bb_mid, bb_lower = _score_mean_reversion(df)
+
         # ── 전략 자동 분류 ──────────────────────────────────────────────────
         # 우선순위:
         #   1. RSI 강한 과매도 → oversold_bounce
@@ -572,6 +655,12 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
             # 멀티 타임프레임
             "mtf_trend":        mtf_trend,
             "mtf_confirmed":    mtf_confirmed,
+            # ADX + 평균 회귀 (TODO 25)
+            "adx":              round(adx_val, 1),
+            "mr_score":         mr_score,
+            "mr_signals":       mr_signals,
+            "bb_mid":           round(bb_mid, 2),
+            "bb_lower":         round(bb_lower, 2),
         }
 
     except Exception as e:
@@ -582,6 +671,7 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
             "sl_pct": None, "tp_pct": None, "style": style,
             "volume_ratio": 0.0, "price_change_pct": 0.0,
             "mtf_trend": "neutral", "mtf_confirmed": True,
+            "adx": 0.0, "mr_score": 0, "mr_signals": [], "bb_mid": 0.0, "bb_lower": 0.0,
         }
 
 

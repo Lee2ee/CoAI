@@ -2,18 +2,23 @@
 AI 설정 관리 API - 프로바이더/모델/API키 동적 변경 지원.
 설정은 사용자별 DB에 저장 (재시작 없이 즉시 적용).
 """
+import json
 import httpx
 import logging
 from fastapi import APIRouter, Depends, HTTPException
+from pathlib import Path
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+_SETTINGS_FILE = Path(__file__).parent.parent.parent / "ai_settings.json"
+
 from .deps import get_current_user
 from ..core.database import get_db
 from ..models.user import User
 from ..models.user_ai_config import UserAIConfig
+from ..services.auto_trade import ai_analyst
 
 router = APIRouter(prefix="/ai-config", tags=["ai-config"])
 logger = logging.getLogger(__name__)
@@ -140,6 +145,21 @@ async def save_config(
         cfg.api_key = body.api_key
     if body.ollama_url:
         cfg.ollama_url = body.ollama_url
+
+    # 런타임 메모리에 즉시 반영 (재시작 없이 모든 프로바이더 즉시 적용)
+    cfg_dict = {
+        "provider": cfg.provider,
+        "model": cfg.model,
+        "api_key": cfg.api_key or "",
+        "ollama_url": cfg.ollama_url or "http://localhost:11434",
+    }
+    ai_analyst.set_config(cfg_dict)
+
+    # 파일도 갱신 (서버 재시작 후 복원용)
+    try:
+        _SETTINGS_FILE.write_text(json.dumps(cfg_dict, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"ai_settings.json 갱신 실패: {e}")
 
     logger.info(f"AI 설정 저장: user={user.id} provider={cfg.provider} model={cfg.model}")
     return {"ok": True, "provider": cfg.provider, "model": cfg.model}

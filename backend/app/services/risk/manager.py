@@ -138,6 +138,57 @@ class PortfolioRiskManager:
         self._refresh_day()
         return self._daily_pnl_krw
 
+    def check_correlation(
+        self,
+        new_symbol: str,
+        open_positions: list[str],
+        close_cache: dict,       # symbol → list[float] (1h 종가 리스트, 최신값이 마지막)
+        threshold: float = 0.8,
+    ) -> tuple[bool, str]:
+        """
+        새 진입 종목과 현재 보유 종목 간 피어슨 상관계수 체크. (TODO 10)
+        threshold 초과 종목이 1개 이상이면 (False, 차단 이유) 반환.
+        데이터 부족(< 10봉) 종목은 스킵.
+        """
+        new_closes = close_cache.get(new_symbol, [])
+        if len(new_closes) < 10:
+            return True, ""
+
+        for sym in open_positions:
+            if sym == new_symbol:
+                continue
+            other_closes = close_cache.get(sym, [])
+            if len(other_closes) < 10:
+                continue
+
+            n = min(len(new_closes), len(other_closes))
+            new_r   = [new_closes[-n + i] / new_closes[-n + i - 1] - 1
+                       for i in range(1, n) if new_closes[-n + i - 1] != 0]
+            other_r = [other_closes[-n + i] / other_closes[-n + i - 1] - 1
+                       for i in range(1, n) if other_closes[-n + i - 1] != 0]
+
+            corr = _pearson(new_r, other_r)
+            if corr > threshold:
+                return False, f"{sym} 상관계수 {corr:.2f} (임계값 {threshold})"
+
+        return True, ""
+
+
+def _pearson(x: list[float], y: list[float]) -> float:
+    """피어슨 상관계수 계산. 분산이 0이면 0 반환."""
+    n = min(len(x), len(y))
+    if n < 3:
+        return 0.0
+    x, y = x[:n], y[:n]
+    mx = sum(x) / n
+    my = sum(y) / n
+    num   = sum((x[i] - mx) * (y[i] - my) for i in range(n))
+    den_x = math.sqrt(sum((v - mx) ** 2 for v in x))
+    den_y = math.sqrt(sum((v - my) ** 2 for v in y))
+    if den_x == 0 or den_y == 0:
+        return 0.0
+    return round(num / (den_x * den_y), 4)
+
 
 # ── 성과 지표 계산 유틸 ──────────────────────────────────────────────────────
 
@@ -188,6 +239,28 @@ def calc_kelly_fraction(
     return max(0.0, min(half_kelly, max_fraction))
 
 
+def calc_var(pnl_list: list[float], confidence: float = 0.95) -> float:
+    """
+    Historical VaR (역사적 시뮬레이션, TODO 13).
+    pnl_list(%) 를 정렬해 하위 (1-confidence) 분위수 절댓값 반환.
+
+    예) confidence=0.95 → 하위 5% 분위수
+    해석: "95% 확률로 하루 최대 손실은 반환값(%)를 초과하지 않는다"
+    데이터 5건 미만이면 0.0 반환 (신뢰도 부족).
+    numpy 없이 순수 Python 선형 보간으로 계산.
+    """
+    if len(pnl_list) < 5:
+        return 0.0
+    sorted_pnl = sorted(pnl_list)
+    # 선형 보간: idx가 정수가 아닐 수 있음
+    raw_idx = (1.0 - confidence) * (len(sorted_pnl) - 1)
+    lo = int(raw_idx)
+    hi = min(lo + 1, len(sorted_pnl) - 1)
+    frac = raw_idx - lo
+    var_val = sorted_pnl[lo] * (1.0 - frac) + sorted_pnl[hi] * frac
+    return round(abs(var_val), 4)
+
+
 def calc_performance(trade_log: list[dict], initial_capital: float = 1_000_000) -> dict:
     """
     거래 로그로 주요 성과 지표 계산.
@@ -195,13 +268,14 @@ def calc_performance(trade_log: list[dict], initial_capital: float = 1_000_000) 
     trade_log 는 최신순(newest first) 리스트.
     Returns dict with:
       sharpe_ratio, sortino_ratio, calmar_ratio, profit_factor,
-      expectancy_pct, max_drawdown_pct,
+      expectancy_pct, max_drawdown_pct, var_95,
       avg_win_pct, avg_loss_pct, win_rate,
       best_trade_pct, worst_trade_pct, total_trades
     """
     _zero = {
         "sharpe_ratio": 0.0, "sortino_ratio": 0.0, "calmar_ratio": 0.0,
         "profit_factor": 0.0, "expectancy_pct": 0.0, "max_drawdown_pct": 0.0,
+        "var_95": 0.0,
         "avg_win_pct": 0.0, "avg_loss_pct": 0.0, "win_rate": 0.0,
         "best_trade_pct": 0.0, "worst_trade_pct": 0.0, "total_trades": 0,
     }
@@ -266,6 +340,7 @@ def calc_performance(trade_log: list[dict], initial_capital: float = 1_000_000) 
         "profit_factor":    profit_factor,
         "expectancy_pct":   expectancy,
         "max_drawdown_pct": round(max_dd, 2),
+        "var_95":           calc_var(pnl_list),
         "avg_win_pct":      round(avg_win, 2),
         "avg_loss_pct":     round(avg_loss, 2),
         "win_rate":         round(win_rate, 1),
