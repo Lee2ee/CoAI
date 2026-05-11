@@ -1026,6 +1026,7 @@ class AutoTradeBot:
             old_regime        = self._current_regime.get("regime")
             old_style         = self._current_regime.get("style")
             old_strategy_mode = self._current_regime.get("strategy_mode", "momentum")
+            old_delta         = self._current_regime.get("min_score_delta", 0)
             self._current_regime = regime
 
             new_style         = regime["style"]
@@ -1040,8 +1041,11 @@ class AutoTradeBot:
                 self.update_settings({"trading_style": new_style})
                 changed.append(f"스타일 {old_style}→{new_style}")
 
-            if delta != 0:
-                new_score = max(40, min(80, self.settings["min_score"] + delta))
+            # delta는 절대값(이전 delta를 되돌리고 새 delta를 적용)으로 처리.
+            # 누적 가산 방지: 같은 국면이 15분마다 반복돼도 min_score가 계속 오르지 않음.
+            delta_change = delta - old_delta
+            if delta_change != 0:
+                new_score = max(40, min(80, self.settings["min_score"] + delta_change))
                 if new_score != self.settings["min_score"]:
                     self.settings["min_score"] = new_score
                     changed.append(f"최소점수 {new_score}")
