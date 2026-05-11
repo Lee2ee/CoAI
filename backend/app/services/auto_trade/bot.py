@@ -793,7 +793,7 @@ class AutoTradeBot:
                         f"AutoBot MDD {perf['max_drawdown_pct']:.1f}% ≥ 한도 {mdd_limit}% "
                         f"— 봇 자동 중지 (VaR95={perf['var_95']:.2f}%)"
                     )
-                    await self.stop()
+                    self.stop()
                     return
 
             if self._is_futures:
@@ -1642,7 +1642,7 @@ class AutoTradeBot:
 
         score = scan["score"]
         signals = scan.get("signals", [])
-        min_score = self.settings["min_score"] + self._current_regime.get("min_score_delta", 0)
+        min_score = self.settings["min_score"]
 
         # 점수 붕괴: 추세가 무너진 것으로 판단 → 물타기 차단
         if score < min_score * 0.6:
@@ -1674,7 +1674,7 @@ class AutoTradeBot:
 
         score = scan["score"]
         signals = scan.get("signals", [])
-        min_score = self.settings["min_score"] + self._current_regime.get("min_score_delta", 0)
+        min_score = self.settings["min_score"]
 
         momentum_kw = ("MACD 골든크로스", "거래량 급증", "골든크로스", "상승추세")
         has_momentum = any(any(kw in s for kw in momentum_kw) for s in signals)
@@ -1699,7 +1699,7 @@ class AutoTradeBot:
 
         score = scan["score"]
         signals = scan.get("signals", [])
-        min_score = self.settings["min_score"] + self._current_regime.get("min_score_delta", 0)
+        min_score = self.settings["min_score"]
 
         strong_kw = ("MACD 골든크로스", "거래량 급증", "골든크로스")
         strong_count = sum(1 for s in signals if any(kw in s for kw in strong_kw))
@@ -1782,8 +1782,7 @@ class AutoTradeBot:
 
         # 최신 스캔 결과에서 해당 종목 스코어 확인
         scan = next((r for r in scan_results if r["symbol"] == symbol), None)
-        min_score = self.settings["min_score"] + self._current_regime.get("min_score_delta", 0)
-        if scan is None or scan["score"] < min_score:
+        if scan is None or scan["score"] < self.settings["min_score"]:
             return
 
         await self._pyramid_into_position(symbol, current_price)
@@ -2019,7 +2018,7 @@ class AutoTradeBot:
 
     async def _enter_futures_from_scan(self, scan_results: list[dict]):
         """선물 스캔 결과에서 신규 포지션 진입."""
-        min_score = self.settings["min_score"] + self._current_regime.get("min_score_delta", 0)
+        min_score = self.settings["min_score"]
         candidates = [
             r for r in scan_results
             if r["score"] >= min_score
@@ -2125,6 +2124,15 @@ class AutoTradeBot:
                 self._consecutive_losses += 1
             else:
                 self._consecutive_losses = 0
+
+            # 전략 실적 업데이트 (현물과 동일하게 추적)
+            st = pos.get("strategy_type", "standard")
+            perf = self._strategy_performance.setdefault(st, {"wins": 0, "losses": 0, "total_pnl": 0.0})
+            if pnl_pct > 0:
+                perf["wins"] += 1
+            else:
+                perf["losses"] += 1
+            perf["total_pnl"] = round(perf["total_pnl"] + pnl_pct, 2)
 
             record = {
                 "symbol":       symbol,
@@ -2423,11 +2431,22 @@ class AutoTradeBot:
 
         performance = calc_performance(logs)
 
+        strategy_stats = {}
+        for st, perf in self._strategy_performance.items():
+            total = perf["wins"] + perf["losses"]
+            strategy_stats[st] = {
+                "wins":      perf["wins"],
+                "losses":    perf["losses"],
+                "total":     total,
+                "win_rate":  round(perf["wins"] / total * 100, 1) if total > 0 else None,
+                "total_pnl": perf["total_pnl"],
+            }
+
         return {
             "running": self._running,
             "paused":  self._paused,
             "scan_in_progress": self._scan_in_progress,
-            "positions": positions,          # 현물 포지션 (비어있음)
+            "positions": [],                 # 현물 포지션 (선물 모드에서는 항상 비어있음)
             "futures_positions": positions,  # 선물 포지션
             "trade_log": logs[:20],
             "scan_results": self._scan_results[:10],
@@ -2445,7 +2464,7 @@ class AutoTradeBot:
             "settings": self.settings,
             "style_label": style_preset.get("label", "단타"),
             "started_at": self._started_at.isoformat() if self._started_at else None,
-            "strategy_stats": {},
+            "strategy_stats": strategy_stats,
             "preferred_strategies": STYLE_PREFERRED_STRATEGIES.get(style, []),
             "ai_available":       ai_analyst.is_ai_available(),
             "ai_regime":          self._current_regime,
