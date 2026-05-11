@@ -36,9 +36,10 @@ interface Props {
   maxAdd: number
   onClose: () => void
   exchangeId?: string
+  feeRate?: number
 }
 
-export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose, exchangeId }: Props) {
+export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose, exchangeId, feeRate = 0 }: Props) {
   const qc = useQueryClient()
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -296,7 +297,9 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose, 
         {/* 헤더 */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-surface-700">
           {(() => {
-            const liveKrw = Math.round((currentPrice - pos.avg_price) * pos.total_amount)
+            const entryFees = pos.total_fee_krw ?? 0
+            const estExitFee = currentPrice * pos.total_amount * feeRate
+            const liveKrw = Math.round((currentPrice - pos.avg_price) * pos.total_amount - entryFees - estExitFee)
             const livePct = pos.avg_price > 0 ? liveKrw / (pos.avg_price * pos.total_amount) * 100 : 0
             const up = livePct >= 0
             return (
@@ -323,7 +326,9 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose, 
         {(() => {
           const invested = Math.round(pos.avg_price * pos.total_amount)
           const current  = Math.round(currentPrice * pos.total_amount)
-          const liveUPnlKrw = Math.round((currentPrice - pos.avg_price) * pos.total_amount)
+          const entryFees = pos.total_fee_krw ?? 0
+          const estExitFee = currentPrice * pos.total_amount * feeRate
+          const liveUPnlKrw = Math.round((currentPrice - pos.avg_price) * pos.total_amount - entryFees - estExitFee)
           const liveUPnlPct = pos.avg_price > 0 ? liveUPnlKrw / (pos.avg_price * pos.total_amount) * 100 : 0
           const pnlPos   = liveUPnlPct >= 0
           return (

@@ -176,6 +176,7 @@ export interface AutoBotPosition {
   current_price: number
   unrealized_pnl_pct: number
   unrealized_pnl_krw: number
+  total_fee_krw?: number
   entry_at: string
   score: number
   signals: string[]

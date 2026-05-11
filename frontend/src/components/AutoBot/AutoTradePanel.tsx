@@ -1295,6 +1295,7 @@ export default function AutoTradePanel() {
           maxAdd={status.settings.max_add}
           onClose={() => setSelectedPos(null)}
           exchangeId={exchangeId}
+          feeRate={status.fee_rate}
         />
       )}
 
