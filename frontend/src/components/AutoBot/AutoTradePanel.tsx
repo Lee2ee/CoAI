@@ -10,7 +10,7 @@ import api from '../../utils/api'
 import Tooltip from '../common/Tooltip'
 import ConfirmModal from '../common/ConfirmModal'
 import type {
-  AutoBotStatus, AutoBotPosition, AutoBotTradeLog, ScanResult,
+  AutoBotStatus, AutoBotSettings, AutoBotPosition, AutoBotTradeLog, ScanResult,
   StylePreset, AutoBotTradeDB, AutoBotTradeStats, AiAnalysisLogEntry, PerformanceStats,
   FuturesPosition, ExchangeAccount,
 } from '../../types'
@@ -102,6 +102,42 @@ const STYLE_LABEL: Record<string, string> = {
   scalping: '초단타', short: '단타', mid: '중장기', long: '장기',
 }
 
+// ─── 투자 성향 메타 ───────────────────────────────────────────────────────────
+
+interface RiskProfileAdjustment {
+  key: string
+  label: string
+  position_size_pct_mult?: number
+  min_score_delta?: number
+  max_positions_delta?: number
+  stop_loss_pct_mult?: number
+  take_profit_pct_mult?: number
+  auto_avg_down?: boolean
+  auto_add?: boolean
+}
+
+const RISK_PROFILE_ORDER = ['conservative', 'balanced', 'aggressive'] as const
+const RISK_PROFILE_META: Record<string, { label: string; badge: string; border: string; desc: string }> = {
+  conservative: {
+    label: '보수적',
+    badge: 'bg-blue-500/20 text-blue-400',
+    border: 'border-blue-500/50',
+    desc: '포지션 60% 크기, 진입 기준 강화, 빠른 손절. 자산 보존 우선.',
+  },
+  balanced: {
+    label: '균형',
+    badge: 'bg-brand-500/20 text-brand-400',
+    border: 'border-brand-500/50',
+    desc: '스타일 프리셋 기본값 그대로 사용.',
+  },
+  aggressive: {
+    label: '공격적',
+    badge: 'bg-orange-500/20 text-orange-400',
+    border: 'border-orange-500/50',
+    desc: '포지션 150% 크기, 진입 기준 완화, 넓은 손절/익절. 수익 극대화 목표.',
+  },
+}
+
 // ─── 설정 모달 ───────────────────────────────────────────────────────────────
 
 function SettingsModal({
@@ -141,11 +177,32 @@ function SettingsModal({
     staleTime: Infinity,
   })
 
+  // 투자 성향 프로파일 조회
+  const { data: riskProfiles } = useQuery<Record<string, RiskProfileAdjustment>>({
+    queryKey: ['risk-profiles'],
+    queryFn: async () => (await api.get('/auto-bot/risk-profiles')).data,
+    staleTime: Infinity,
+  })
+
+  // 프리셋 기본값에 투자 성향 조정치를 적용
+  const applyRiskAdj = (base: Partial<AutoBotSettings>, profile: string): Partial<AutoBotSettings> => {
+    const adj = riskProfiles?.[profile]
+    if (!adj) return base
+    const r = { ...base }
+    if (adj.position_size_pct_mult != null) r.position_size_pct = Math.round(base.position_size_pct! * adj.position_size_pct_mult * 10) / 10
+    if (adj.min_score_delta != null) r.min_score = Math.min(90, Math.max(30, base.min_score! + adj.min_score_delta))
+    if (adj.max_positions_delta != null) r.max_positions = Math.max(1, base.max_positions! + adj.max_positions_delta)
+    if (adj.stop_loss_pct_mult != null) r.stop_loss_pct = Math.round(base.stop_loss_pct! * adj.stop_loss_pct_mult * 10) / 10
+    if (adj.take_profit_pct_mult != null) r.take_profit_pct = Math.round(base.take_profit_pct! * adj.take_profit_pct_mult * 10) / 10
+    if (adj.auto_avg_down != null) r.auto_avg_down = adj.auto_avg_down
+    if (adj.auto_add != null) r.auto_add = adj.auto_add
+    return r
+  }
+
   const applyStyle = (styleKey: string) => {
     const preset = presets?.[styleKey]
     if (!preset) return
-    setForm(f => ({
-      ...f,
+    const base: Partial<AutoBotSettings> = {
       trading_style: styleKey,
       timeframe: preset.timeframe,
       scan_interval_min: preset.scan_interval_min,
@@ -160,11 +217,30 @@ function SettingsModal({
       auto_add: preset.auto_add,
       add_threshold_pct: preset.add_threshold_pct,
       max_add: preset.max_add,
-    }))
+    }
+    const adjusted = applyRiskAdj(base, form.risk_profile ?? 'balanced')
+    setForm(f => ({ ...f, ...adjusted }))
+  }
+
+  const applyRiskProfile = (profile: string) => {
+    const preset = presets?.[form.trading_style ?? 'short']
+    if (!preset) { setForm(f => ({ ...f, risk_profile: profile })); return }
+    const base: Partial<AutoBotSettings> = {
+      stop_loss_pct: preset.stop_loss_pct,
+      take_profit_pct: preset.take_profit_pct,
+      min_score: preset.min_score,
+      position_size_pct: preset.position_size_pct,
+      max_positions: preset.max_positions,
+      auto_avg_down: preset.auto_avg_down,
+      auto_add: preset.auto_add,
+    }
+    const adjusted = applyRiskAdj(base, profile)
+    setForm(f => ({ ...f, risk_profile: profile, ...adjusted }))
   }
 
   const currentStyle = form.trading_style ?? 'short'
   const currentMeta = STYLE_META[currentStyle] ?? STYLE_META.short
+  const currentRiskProfile = form.risk_profile ?? 'balanced'
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
@@ -340,6 +416,34 @@ function SettingsModal({
               <p className={clsx('font-medium', currentMeta.color)}>{currentMeta.desc}</p>
               <p className="text-slate-500 mt-0.5">거래량 기준: {(form.exchange_id ?? 'upbit') === 'upbit' ? currentMeta.volDesc : currentMeta.volDescUsdt}</p>
             </div>
+          </div>
+
+          {/* 투자 성향 */}
+          <div className="border-t border-surface-700 pt-4">
+            <p className="text-xs text-slate-400 font-medium mb-2 flex items-center gap-1">
+              투자 성향
+              <Tooltip text="같은 매매 스타일에서 포지션 크기·진입 기준·손절/익절 폭을 일괄 조정합니다. 보수적일수록 작게 걸고 빠르게 손절하며, 공격적일수록 크게 걸고 넓게 버팁니다." iconOnly />
+            </p>
+            <div className="grid grid-cols-3 gap-1.5">
+              {RISK_PROFILE_ORDER.map(key => {
+                const meta = RISK_PROFILE_META[key]
+                return (
+                  <button
+                    key={key}
+                    onClick={() => applyRiskProfile(key)}
+                    className={clsx(
+                      'py-2 rounded-lg text-xs font-semibold border transition-colors',
+                      currentRiskProfile === key
+                        ? `${meta.badge} ${meta.border}`
+                        : 'bg-surface-700 border-surface-600 text-slate-400 hover:text-slate-200'
+                    )}
+                  >
+                    {meta.label}
+                  </button>
+                )
+              })}
+            </div>
+            <p className="text-xs text-slate-500 mt-1.5">{RISK_PROFILE_META[currentRiskProfile]?.desc}</p>
           </div>
 
           {/* 기본 설정 */}

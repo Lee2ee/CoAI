@@ -222,6 +222,7 @@ export interface AutoBotSettings {
   exchange_id?: string
   is_paper?: boolean
   trading_style: string
+  risk_profile?: string
   scan_interval_min: number
   max_positions: number
   position_size_pct: number

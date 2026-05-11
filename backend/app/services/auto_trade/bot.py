@@ -110,6 +110,56 @@ TRADING_STYLE_PRESETS: dict[str, dict] = {
 }
 
 
+# ── 투자 성향 프로파일 ────────────────────────────────────────────────────────
+# 스타일 프리셋 기본값에 곱/가산하는 조정치. "balanced"는 변경 없음.
+RISK_PROFILE_ADJUSTMENTS: dict[str, dict] = {
+    "conservative": {
+        "label": "보수적",
+        "position_size_pct_mult": 0.6,   # 포지션 크기 60%
+        "min_score_delta": 10,            # 진입 기준 +10점 (더 엄격)
+        "max_positions_delta": -1,        # 최대 포지션 -1
+        "stop_loss_pct_mult": 0.7,        # 손절 더 타이트
+        "take_profit_pct_mult": 0.8,      # 익절 더 낮게
+        "auto_avg_down": False,
+        "auto_add": False,
+    },
+    "balanced": {
+        "label": "균형",
+    },
+    "aggressive": {
+        "label": "공격적",
+        "position_size_pct_mult": 1.5,   # 포지션 크기 150%
+        "min_score_delta": -10,           # 진입 기준 -10점 (더 완화)
+        "max_positions_delta": 2,         # 최대 포지션 +2
+        "stop_loss_pct_mult": 1.5,        # 손절 더 넓게 (버티기)
+        "take_profit_pct_mult": 1.5,      # 익절 더 높게
+        "auto_avg_down": True,
+        "auto_add": True,
+    },
+}
+
+
+def apply_risk_profile(preset: dict, profile: str) -> dict:
+    """스타일 프리셋에 투자 성향 조정을 적용한 복사본 반환"""
+    adj = RISK_PROFILE_ADJUSTMENTS.get(profile, {})
+    result = dict(preset)
+    if "position_size_pct_mult" in adj:
+        result["position_size_pct"] = round(preset["position_size_pct"] * adj["position_size_pct_mult"], 1)
+    if "min_score_delta" in adj:
+        result["min_score"] = int(min(90, max(30, preset["min_score"] + adj["min_score_delta"])))
+    if "max_positions_delta" in adj:
+        result["max_positions"] = max(1, preset["max_positions"] + adj["max_positions_delta"])
+    if "stop_loss_pct_mult" in adj:
+        result["stop_loss_pct"] = round(preset["stop_loss_pct"] * adj["stop_loss_pct_mult"], 1)
+    if "take_profit_pct_mult" in adj:
+        result["take_profit_pct"] = round(preset["take_profit_pct"] * adj["take_profit_pct_mult"], 1)
+    if "auto_avg_down" in adj:
+        result["auto_avg_down"] = adj["auto_avg_down"]
+    if "auto_add" in adj:
+        result["auto_add"] = adj["auto_add"]
+    return result
+
+
 # ── 스타일별 선호 전략 순서 ──────────────────────────────────────────────────
 # 각 스타일에서 신호 강도가 동일하다면 앞쪽 전략을 우선 진입
 STYLE_PREFERRED_STRATEGIES: dict[str, list[str]] = {
@@ -177,6 +227,7 @@ class AutoTradeBot:
         self.settings: dict = {
             "exchange_id": "upbit",         # "upbit" | "binance" | "bybit"
             "trading_style": "short",
+            "risk_profile": "balanced",     # "conservative" | "balanced" | "aggressive"
             "scan_interval_min": 5,
             "max_positions": 4,
             "position_size_pct": 25.0,
@@ -431,12 +482,14 @@ class AutoTradeBot:
         self.stop()
 
     def update_settings(self, new_settings: dict):
-        # 스타일 변경 시 프리셋 먼저 적용
+        # 스타일 변경 시 프리셋 + 투자 성향(risk_profile)을 함께 적용
         if "trading_style" in new_settings:
             style = new_settings["trading_style"]
             preset = TRADING_STYLE_PRESETS.get(style)
             if preset:
-                for k, v in preset.items():
+                profile = new_settings.get("risk_profile") or self.settings.get("risk_profile", "balanced")
+                applied = apply_risk_profile(preset, profile)
+                for k, v in applied.items():
                     if k != "label" and k in self.settings:
                         self.settings[k] = v
                 self.settings["trading_style"] = style

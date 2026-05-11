@@ -2,7 +2,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, BackgroundTasks, Body, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func as sqlfunc
-from ..services.auto_trade.bot import get_auto_bot, TRADING_STYLE_PRESETS
+from ..services.auto_trade.bot import get_auto_bot, TRADING_STYLE_PRESETS, RISK_PROFILE_ADJUSTMENTS
 from ..services.risk.manager import calc_var
 from ..models.user import User
 from ..models.auto_bot_trade import AutoBotTrade
@@ -84,6 +84,15 @@ async def style_presets(user: User = Depends(get_current_user)):
     return {
         key: {**preset, "key": key}
         for key, preset in TRADING_STYLE_PRESETS.items()
+    }
+
+
+@router.get("/risk-profiles")
+async def risk_profiles(user: User = Depends(get_current_user)):
+    """투자 성향 프로파일 목록 반환"""
+    return {
+        key: {**adj, "key": key}
+        for key, adj in RISK_PROFILE_ADJUSTMENTS.items()
     }
 
 
