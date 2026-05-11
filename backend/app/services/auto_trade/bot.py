@@ -817,11 +817,23 @@ class AutoTradeBot:
         )
 
         # DB 전략 조건 평가 → 스캔 결과에 병합
+        # 심볼이 이미 스캔됐으면 점수를 DB 후보값으로 높이고 신호를 병합.
+        # 이전 코드(심볼 중복 시 무시)는 일반 스캔 점수가 낮아 진입이 영원히 차단되는 버그 유발.
         db_candidates = await self._eval_db_strategies(scan_results)
         if db_candidates:
-            existing_symbols = {r["symbol"] for r in scan_results}
+            symbol_to_idx = {r["symbol"]: i for i, r in enumerate(scan_results)}
             for c in db_candidates:
-                if c["symbol"] not in existing_symbols:
+                if c["symbol"] in symbol_to_idx:
+                    idx = symbol_to_idx[c["symbol"]]
+                    existing = scan_results[idx]
+                    scan_results[idx] = {
+                        **existing,
+                        "score":    max(existing["score"], c["score"]),
+                        "signals":  existing.get("signals", []) + c.get("signals", []),
+                        "sl_pct":   c["sl_pct"] or existing.get("sl_pct"),
+                        "tp_pct":   c["tp_pct"] or existing.get("tp_pct"),
+                    }
+                else:
                     scan_results.append(c)
 
         self._scan_results = scan_results
@@ -1120,16 +1132,29 @@ class AutoTradeBot:
             if symbol in self._positions:
                 continue
             try:
+                # 진입 조건에서 최대 지표 기간을 추출해 충분한 봉 수 확보
+                max_period = max(
+                    (max(
+                        c.get("params", {}).get("length", 0),
+                        c.get("params", {}).get("slow", 0),
+                        c.get("params", {}).get("fast", 0),
+                    ) for c in entry_c),
+                    default=14,
+                )
+                fetch_limit = max(150, max_period * 2 + 50)
                 df = await asyncio.wait_for(
-                    self._connector.fetch_ohlcv(symbol, tf, limit=150),
+                    self._connector.fetch_ohlcv(symbol, tf, limit=fetch_limit),
                     timeout=12,
                 )
                 if len(df) < 50 or not evaluate_conditions(df, entry_c):
                     continue
                 risk = cfg.get("risk", {})
+                # DB 전략 점수는 현재 min_score보다 항상 높게 설정해 진입 차단 방지.
+                # 하드코딩 70은 conservative/AI 국면 상향으로 min_score가 70+가 되면 진입 불가 버그 유발.
+                db_score = min(100, self.settings["min_score"] + 15)
                 extra.append({
                     "symbol":           symbol,
-                    "score":            70,
+                    "score":            db_score,
                     "rsi":              50.0,
                     "price":            float(df["close"].iloc[-1]),
                     "signals":          [f"DB전략 진입: {strat['name']}"],
