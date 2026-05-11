@@ -582,6 +582,21 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         except Exception:
             pass
 
+        # ── 추세 지속 점수 (ADX + EMA 정배열) ───────────────────────────────
+        # RSI 과매도 신호 없이도 추세장에서 진입 기회를 포착하기 위한 보정.
+        # ADX >= 25: 추세 진행 중, ADX >= 35: 강한 추세.
+        # EMA20 > EMA50 (ema_pts >= 12) 조건을 함께 요구해 과진입 방지.
+        if adx_val >= 25 and ema_pts >= 12:
+            trend_bonus = 20 if adx_val >= 35 else 12
+            score += trend_bonus
+            signals.append(f"{'강한 ' if adx_val >= 35 else ''}추세장 (ADX {adx_val:.0f})")
+
+        # RSI 추세 구간 (50~70) + MACD 강세 → 추세 지속 확인 신호
+        # 과매도(rsi_oversold) 신호와 중복 방지
+        if 50 <= rsi <= 70 and (macd_bull or macd_cross) and not rsi_oversold and not rsi_strong_oversold:
+            score += int(8 * weights["rsi"])
+            signals.append(f"RSI 추세 구간 ({rsi:.0f})")
+
         # ── 평균 회귀 점수 계산 ──────────────────────────────────────────
         mr_signals, mr_score, bb_mid, bb_lower = _score_mean_reversion(df)
 
@@ -593,11 +608,11 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         #   4. MACD 크로스 + 거래량 돌파 → volume_breakout
         #   5. MACD 크로스 → macd_momentum
         #   6. 거래량 돌파 (EMA 상단 또는 RSI 반등 확인) → volume_breakout
-        #   7. RSI 반등만 단독 → oversold_bounce (낮은 신뢰도)
+        #   7. MACD 강세 + 강한 추세(ADX>=25) → macd_momentum
+        #   8. RSI 반등만 단독 → oversold_bounce (낮은 신뢰도)
         if rsi_strong_oversold:
             strategy_type = "oversold_bounce"
         elif rsi_is_bounce and has_reversal_candle:
-            # 핵심 개선: 하락봉 저점에서 RSI 반등 + 캔들 패턴 동시 확인
             strategy_type = "oversold_bounce"
         elif golden_cross:
             strategy_type = "golden_cross"
@@ -606,8 +621,10 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         elif macd_cross:
             strategy_type = "macd_momentum"
         elif volume_breakout and (above_ema20 or rsi_is_bounce):
-            # 거래량 돌파: EMA 상단 OR RSI 반등으로 확인 (기존보다 조건 완화)
             strategy_type = "volume_breakout"
+        elif macd_bull and adx_val >= 25 and ema_pts >= 12:
+            # 추세 지속: MACD 강세 구간 + 강한 추세 + EMA 정배열
+            strategy_type = "macd_momentum"
         elif rsi_is_bounce:
             strategy_type = "oversold_bounce"
         else:
