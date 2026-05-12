@@ -1280,7 +1280,11 @@ class AutoTradeBot:
                 # ── TODO 4: AI 청산 타이밍 보조 (이익 중 포지션만) ──────────
                 pnl_pct = pos.get("unrealized_pnl_pct", 0)
                 min_pnl_for_ai = {"scalping": 0.8, "short": 1.5, "mid": 3.0, "long": 5.0}
-                ai_pnl_threshold = min_pnl_for_ai.get(style, 1.5)
+                _style_threshold = min_pnl_for_ai.get(style, 1.5)
+                _sl_pct = self.settings.get("stop_loss_pct", 2.5)
+                _tp_pct = self.settings.get("take_profit_pct", 6.0)
+                # AI 청산은 최소 손절% 이상 수익일 때만 발동 (손익비 보장)
+                ai_pnl_threshold = max(_style_threshold, _sl_pct)
                 if (
                     pnl_pct >= ai_pnl_threshold
                     and not pos.get("trailing_active")
@@ -1294,6 +1298,8 @@ class AutoTradeBot:
                         strategy_type=pos.get("strategy_type", "standard"),
                         signals=pos.get("signals", []),
                         sl_gap_pct=sl_gap,
+                        sl_pct=_sl_pct,
+                        tp_pct=_tp_pct,
                     )
                     if exit_ai["action"] == "close_now":
                         log_entry = {
