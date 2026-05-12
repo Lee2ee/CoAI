@@ -441,11 +441,15 @@ async def check_exit(
     strategy_type: str,
     signals: list[str],
     sl_gap_pct: float,
+    sl_pct: float = 2.5,
+    tp_pct: float = 6.0,
 ) -> dict:
     """
     이익 중인 포지션의 청산 타이밍 판단 (5분 캐시).
 
     sl_gap_pct: 현재가와 SL 사이 거리 (%)
+    sl_pct: 손절 설정값 (%)
+    tp_pct: 익절 설정값 (%)
 
     Returns:
         {
@@ -459,10 +463,14 @@ async def check_exit(
         return cached
 
     signals_str = ", ".join(signals[:3]) if signals else "none"
+    tp_progress = round(pnl_pct / tp_pct * 100) if tp_pct > 0 else 0
     prompt = (
         f"Crypto exit decision. Reply ONLY with JSON. reason must be in Korean.\n"
         f"Symbol:{symbol} PnL:{pnl_pct:+.1f}% Strategy:{strategy_type} "
+        f"SL:{sl_pct:.1f}% TP:{tp_pct:.1f}% TP_progress:{tp_progress}% "
         f"SL_gap:{sl_gap_pct:.1f}% Signals:{signals_str}\n"
+        f"R:R context: if closed now, win={pnl_pct:.1f}% vs potential loss={sl_pct:.1f}%.\n"
+        f"Prefer hold unless strong reversal signal. "
         f"Actions: hold=keep position, tighten_sl=raise stop loss, close_now=exit immediately\n"
         f'{{"action":"hold/tighten_sl/close_now","reason":"한국어 1문장"}}'
     )
