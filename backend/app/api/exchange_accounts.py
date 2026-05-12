@@ -15,8 +15,14 @@ from .deps import get_current_user
 
 router = APIRouter(prefix="/exchange-accounts", tags=["exchange-accounts"])
 
-SUPPORTED_EXCHANGES = ["upbit"]
-# 확장 시 여기에 추가: SUPPORTED_EXCHANGES.append("binance")
+SUPPORTED_EXCHANGES = ["upbit", "binance", "bybit"]
+
+# 거래소별 BTC 연결 테스트 심볼
+_BTC_SYMBOL: dict[str, str] = {
+    "upbit":   "BTC/KRW",
+    "binance": "BTC/USDT",
+    "bybit":   "BTC/USDT",
+}
 
 
 def _to_read(account: ExchangeAccount) -> ExchangeAccountRead:
@@ -199,10 +205,15 @@ async def test_connection(
 ):
     account = await _get_account_or_404(account_id, user, db)
     connector = _make_connector(account)
+    btc_symbol = _BTC_SYMBOL.get(account.exchange, "BTC/USDT")
     try:
-        ticker = await connector.fetch_ticker("BTC/KRW")
+        ticker = await connector.fetch_ticker(btc_symbol)
         await connector.close()
-        return {"ok": True, "btc_price": ticker["last"]}
+        return {
+            "ok": True,
+            "btc_price": ticker["last"],
+            "quote": "KRW" if account.exchange == "upbit" else "USDT",
+        }
     except Exception as e:
         await connector.close()
         return {"ok": False, "error": str(e)}

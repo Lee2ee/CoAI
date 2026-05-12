@@ -9,6 +9,15 @@ import { X, TrendingDown, TrendingUp, AlertTriangle } from 'lucide-react'
 import api from '../../utils/api'
 import type { AutoBotPosition, OHLCVBar } from '../../types'
 import clsx from 'clsx'
+import Tooltip from '../common/Tooltip'
+import ConfirmModal from '../common/ConfirmModal'
+
+function fmtCurrency(amount: number, exchangeId?: string): string {
+  if (!exchangeId || exchangeId === 'upbit') {
+    return amount.toLocaleString('ko-KR') + ' ₩'
+  }
+  return '$' + amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
 
 const ENTRY_COLORS = {
   initial: '#3b82f6',   // 파란색 - 최초 진입
@@ -26,9 +35,11 @@ interface Props {
   maxAvgDown: number
   maxAdd: number
   onClose: () => void
+  exchangeId?: string
+  feeRate?: number
 }
 
-export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }: Props) {
+export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose, exchangeId, feeRate = 0 }: Props) {
   const qc = useQueryClient()
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -37,19 +48,21 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }
   // price line refs - 중복 생성 방지
   const priceLinesRef = useRef<ReturnType<ISeriesApi<'Candlestick'>['createPriceLine']>[]>([])
   const base = pos.symbol.split('/')[0]
-  const pnlPos = pos.unrealized_pnl_pct >= 0
 
   const [timeframe, setTimeframe] = useState('1m')
   // timeframeRef: WebSocket handler stale closure 방지
   const timeframeRef = useRef('1m')
   useEffect(() => { timeframeRef.current = timeframe }, [timeframe])
 
+  // 실시간 현재가 (WebSocket) — 카드·차트 모두 동일 값 사용
+  const [currentPrice, setCurrentPrice] = useState(pos.current_price)
+
   // OHLCV 데이터
   const { data: ohlcv } = useQuery<OHLCVBar[]>({
     queryKey: ['ohlcv-pos', pos.symbol, timeframe],
     queryFn: async () => {
       const res = await api.get('/market/ohlcv', {
-        params: { symbol: pos.symbol, timeframe, limit: 200, exchange: 'upbit' },
+        params: { symbol: pos.symbol, timeframe, limit: 200, exchange: exchangeId ?? 'upbit' },
       })
       return res.data.data
     },
@@ -166,7 +179,7 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }
         position: 'belowBar',
         color: ENTRY_COLORS[e.type],
         shape: 'arrowUp',
-        text: `${ENTRY_LABELS[e.type]} ${e.price.toLocaleString('ko-KR')}`,
+        text: `${ENTRY_LABELS[e.type]} ${fmtCurrency(e.price, exchangeId)}`,
         size: 2,
       })
     }
@@ -213,10 +226,10 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }
   // ohlcvRef 동기화
   useEffect(() => { if (ohlcv) ohlcvRef.current = ohlcv }, [ohlcv])
 
-  // WebSocket 실시간 시세 (3초 간격)
+  // WebSocket 실시간 시세
   useEffect(() => {
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const url = `${proto}://${window.location.host}/ws/ticker?symbol=${encodeURIComponent(pos.symbol)}&exchange=upbit`
+    const url = `${proto}://${window.location.host}/ws/ticker?symbol=${encodeURIComponent(pos.symbol)}&exchange=${exchangeId ?? 'upbit'}`
     const ws = new WebSocket(url)
 
     const TIMEFRAME_SECONDS: Record<string, number> = {
@@ -227,6 +240,7 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data)
       if (msg.type !== 'ticker') return
+      setCurrentPrice(msg.last)
       const bars = ohlcvRef.current
       if (!candleRef.current || bars.length === 0) return
 
@@ -261,8 +275,20 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }
 
   const canAvgDown = pos.avg_down_count < maxAvgDown
   const canAdd = pos.add_count < maxAdd
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false)
 
   return (
+    <>
+    {showCloseConfirm && (
+      <ConfirmModal
+        message={`${pos.symbol} 포지션을 수동 청산하시겠습니까?`}
+        detail={`현재가 ${fmtCurrency(currentPrice, exchangeId)}에 즉시 매도됩니다.`}
+        confirmText="청산"
+        variant="danger"
+        onConfirm={() => closeMut.mutate()}
+        onClose={() => setShowCloseConfirm(false)}
+      />
+    )}
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3" onClick={onClose}>
       <div
         className="bg-surface-800 border border-surface-700 rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto"
@@ -270,18 +296,24 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }
       >
         {/* 헤더 */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-surface-700">
-          <div className="flex items-center gap-3">
-            <span className="font-bold text-slate-100 text-lg">{pos.symbol}</span>
-            <span className={clsx(
-              'text-sm font-bold',
-              pnlPos ? 'text-up' : 'text-down'
-            )}>
-              {pnlPos ? '+' : ''}{pos.unrealized_pnl_pct.toFixed(2)}%
-            </span>
-            <span className={clsx('text-xs', pnlPos ? 'text-up/70' : 'text-down/70')}>
-              ({pnlPos ? '+' : ''}{pos.unrealized_pnl_krw.toLocaleString('ko-KR')} ₩)
-            </span>
-          </div>
+          {(() => {
+            const entryFees = pos.total_fee_krw ?? 0
+            const estExitFee = currentPrice * pos.total_amount * feeRate
+            const liveKrw = Math.round((currentPrice - pos.avg_price) * pos.total_amount - entryFees - estExitFee)
+            const livePct = pos.avg_price > 0 ? liveKrw / (pos.avg_price * pos.total_amount) * 100 : 0
+            const up = livePct >= 0
+            return (
+              <div className="flex items-center gap-3">
+                <span className="font-bold text-slate-100 text-lg">{pos.symbol}</span>
+                <span className={clsx('text-sm font-bold', up ? 'text-up' : 'text-down')}>
+                  {up ? '+' : ''}{livePct.toFixed(2)}%
+                </span>
+                <span className={clsx('text-xs', up ? 'text-up/70' : 'text-down/70')}>
+                  ({up ? '+' : ''}{fmtCurrency(liveKrw, exchangeId)})
+                </span>
+              </div>
+            )
+          })()}
           <button onClick={onClose} className="text-slate-400 hover:text-slate-200">
             <X size={20} />
           </button>
@@ -293,8 +325,12 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }
         {/* 투입금액 요약 바 */}
         {(() => {
           const invested = Math.round(pos.avg_price * pos.total_amount)
-          const current  = Math.round(pos.current_price * pos.total_amount)
-          const pnlPos   = pos.unrealized_pnl_pct >= 0
+          const current  = Math.round(currentPrice * pos.total_amount)
+          const entryFees = pos.total_fee_krw ?? 0
+          const estExitFee = currentPrice * pos.total_amount * feeRate
+          const liveUPnlKrw = Math.round((currentPrice - pos.avg_price) * pos.total_amount - entryFees - estExitFee)
+          const liveUPnlPct = pos.avg_price > 0 ? liveUPnlKrw / (pos.avg_price * pos.total_amount) * 100 : 0
+          const pnlPos   = liveUPnlPct >= 0
           return (
             <div className={clsx(
               'mx-4 mt-3 rounded-lg border px-4 py-2.5 flex items-center gap-6 flex-wrap text-sm',
@@ -303,21 +339,24 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }
               <div>
                 <p className="text-xs text-slate-500 mb-0.5">투입금액</p>
                 <p className="font-mono font-bold text-slate-100 tabular-nums">
-                  {invested.toLocaleString('ko-KR')} ₩
+                  {fmtCurrency(invested, exchangeId)}
                 </p>
               </div>
               <span className="text-slate-600 text-lg">→</span>
               <div>
                 <p className="text-xs text-slate-500 mb-0.5">현재가치</p>
                 <p className={clsx('font-mono font-bold tabular-nums', pnlPos ? 'text-up' : 'text-down')}>
-                  {current.toLocaleString('ko-KR')} ₩
+                  {fmtCurrency(current, exchangeId)}
                 </p>
               </div>
               <div className="ml-auto text-right">
-                <p className="text-xs text-slate-500 mb-0.5">미실현 손익</p>
+                <p className="text-xs text-slate-500 mb-0.5 flex items-center justify-end gap-1">
+                  미실현 손익
+                  <Tooltip text="아직 매도하지 않은 포지션의 현재 손익입니다. 청산 시 실제 수익/손실로 확정됩니다. (Unrealized P&L)" iconOnly />
+                </p>
                 <p className={clsx('font-mono font-bold tabular-nums text-base', pnlPos ? 'text-up' : 'text-down')}>
-                  {pnlPos ? '+' : ''}{pos.unrealized_pnl_krw.toLocaleString('ko-KR')} ₩
-                  <span className="text-sm ml-1">({pnlPos ? '+' : ''}{pos.unrealized_pnl_pct.toFixed(2)}%)</span>
+                  {pnlPos ? '+' : ''}{fmtCurrency(liveUPnlKrw, exchangeId)}
+                  <span className="text-sm ml-1">({pnlPos ? '+' : ''}{liveUPnlPct.toFixed(2)}%)</span>
                 </p>
               </div>
             </div>
@@ -326,14 +365,19 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }
 
         {/* 포지션 요약 */}
         <div className="px-4 pt-3 pb-2 grid grid-cols-2 lg:grid-cols-4 gap-2 text-xs">
-          <InfoBox label="평균단가" value={`${pos.avg_price.toLocaleString('ko-KR')} ₩`} color="amber" />
-          <InfoBox label="현재가" value={`${pos.current_price.toLocaleString('ko-KR')} ₩`} />
+          <InfoBox label="평균단가" value={fmtCurrency(pos.avg_price, exchangeId)} color="amber"
+            tooltip="물타기·추매를 포함한 모든 진입 평균 매수가입니다." />
+          <InfoBox label="현재가" value={fmtCurrency(currentPrice, exchangeId)} />
           <InfoBox label="보유수량" value={`${pos.total_amount.toFixed(6)} ${base}`} />
-          <InfoBox label="진입 횟수" value={`${pos.entries.length}회 (물타기 ${pos.avg_down_count} / 추매 ${pos.add_count})`} />
-          <InfoBox label="손절가" value={`${pos.stop_loss_price.toLocaleString('ko-KR')} ₩`} color="down" />
-          <InfoBox label="익절가" value={`${pos.take_profit_price.toLocaleString('ko-KR')} ₩`} color="up" />
+          <InfoBox label="진입 횟수" value={`${pos.entries.length}회 (물타기 ${pos.avg_down_count} / 추매 ${pos.add_count})`}
+            tooltip="물타기: 하락 시 평단을 낮추기 위한 추가 매수. 추매: 상승 추세에서 수익을 극대화하는 추가 매수." />
+          <InfoBox label="손절가" value={fmtCurrency(pos.stop_loss_price, exchangeId)} color="down"
+            tooltip="현재가가 이 가격 아래로 내려가면 손실을 줄이기 위해 자동으로 매도합니다. (Stop Loss)" />
+          <InfoBox label="익절가" value={fmtCurrency(pos.take_profit_price, exchangeId)} color="up"
+            tooltip="현재가가 이 가격 이상으로 오르면 수익을 확정하기 위해 자동으로 매도합니다. (Take Profit)" />
           <InfoBox label="최초 진입" value={pos.entry_at.slice(0, 16).replace('T', ' ')} />
-          <InfoBox label="AI 점수" value={`${pos.score}점`} color="brand" />
+          <InfoBox label="AI 점수" value={`${pos.score}점`} color="brand"
+            tooltip="진입 시점에 AI가 평가한 매수 신호 강도입니다. RSI, MACD, 거래량, 추세 등 다양한 지표를 종합해 0~100점으로 산출됩니다." />
         </div>
 
         {/* 진입 이력 */}
@@ -347,10 +391,10 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }
                   <span className="w-12 font-medium flex-shrink-0" style={{ color: ENTRY_COLORS[e.type] }}>
                     {ENTRY_LABELS[e.type]}
                   </span>
-                  <span className="font-mono text-slate-200">{e.price.toLocaleString('ko-KR')} ₩</span>
+                  <span className="font-mono text-slate-200">{fmtCurrency(e.price, exchangeId)}</span>
                   <span className="text-slate-400">{e.amount.toFixed(6)} {base}</span>
                   <span className="font-mono font-semibold text-slate-100 tabular-nums">
-                    = {entryKrw.toLocaleString('ko-KR')} ₩
+                    = {fmtCurrency(entryKrw, exchangeId)}
                   </span>
                   <span className="text-slate-500 ml-auto flex-shrink-0">{e.at.slice(0, 16).replace('T', ' ')}</span>
                 </div>
@@ -361,9 +405,9 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }
               <span className="w-12 text-slate-400 flex-shrink-0">합계</span>
               <span className="text-slate-400">{pos.total_amount.toFixed(6)} {base}</span>
               <span className="font-mono font-bold text-slate-100 tabular-nums">
-                = {Math.round(pos.avg_price * pos.total_amount).toLocaleString('ko-KR')} ₩
+                = {fmtCurrency(Math.round(pos.avg_price * pos.total_amount), exchangeId)}
               </span>
-              <span className="text-slate-500 ml-auto">(평단 {pos.avg_price.toLocaleString('ko-KR')} ₩)</span>
+              <span className="text-slate-500 ml-auto">(평단 {fmtCurrency(pos.avg_price, exchangeId)})</span>
             </div>
           </div>
         </div>
@@ -372,11 +416,21 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }
         <div className="px-4 pb-1 flex items-center justify-between flex-wrap gap-2">
           <div className="flex gap-3 text-xs text-slate-500 flex-wrap">
             <span className="flex items-center gap-1"><span style={{ color: '#3b82f6' }}>▲</span> 최초 진입</span>
-            <span className="flex items-center gap-1"><span style={{ color: '#f59e0b' }}>▲</span> 물타기</span>
-            <span className="flex items-center gap-1"><span style={{ color: '#22c55e' }}>▲</span> 추매</span>
-            <span className="flex items-center gap-1"><span className="text-amber-400">- -</span> 평단가</span>
-            <span className="flex items-center gap-1"><span className="text-down">···</span> 손절가</span>
-            <span className="flex items-center gap-1"><span className="text-up">···</span> 익절가</span>
+            <Tooltip text="하락 시 평균 단가를 낮추기 위해 추가 매수한 시점입니다. (Averaging Down)">
+              <span className="flex items-center gap-1"><span style={{ color: '#f59e0b' }}>▲</span> 물타기</span>
+            </Tooltip>
+            <Tooltip text="상승 추세에서 수익을 극대화하기 위해 추가 매수한 시점입니다. (Adding to Position)">
+              <span className="flex items-center gap-1"><span style={{ color: '#22c55e' }}>▲</span> 추매</span>
+            </Tooltip>
+            <Tooltip text="모든 진입 가격의 평균값입니다. 이 가격 이상이면 수익, 미만이면 손실 상태입니다.">
+              <span className="flex items-center gap-1"><span className="text-amber-400">- -</span> 평단가</span>
+            </Tooltip>
+            <Tooltip text="현재가가 이 선 아래로 내려가면 자동 매도됩니다. (Stop Loss)">
+              <span className="flex items-center gap-1"><span className="text-down">···</span> 손절가</span>
+            </Tooltip>
+            <Tooltip text="현재가가 이 선 이상으로 오르면 수익을 확정하고 자동 매도됩니다. (Take Profit)">
+              <span className="flex items-center gap-1"><span className="text-up">···</span> 익절가</span>
+            </Tooltip>
           </div>
           <div className="flex gap-1">
             {(['1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M'] as const).map(tf => (
@@ -435,18 +489,17 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose }
           </div>
 
           <button
-            onClick={() => {
-              if (confirm(`${pos.symbol} 포지션을 수동 청산하시겠습니까?`)) closeMut.mutate()
-            }}
+            onClick={() => setShowCloseConfirm(true)}
             disabled={closeMut.isPending}
             className="w-full py-2.5 rounded-lg text-sm font-medium border bg-down/10 border-down/40 text-down hover:bg-down/20 transition-colors flex items-center justify-center gap-1.5"
           >
             <AlertTriangle size={15} />
-            수동 청산 (현재가 {pos.current_price.toLocaleString('ko-KR')} ₩)
+            수동 청산 (현재가 {fmtCurrency(currentPrice, exchangeId)})
           </button>
         </div>
       </div>
     </div>
+    </>
   )
 }
 
@@ -499,13 +552,22 @@ function StrategyBanner({ pos }: { pos: AutoBotPosition }) {
         </span>
         <span className="text-xs text-slate-500 ml-auto flex items-center gap-3">
           <span>
-            {slAboveEntry ? 'SL보호 ' : '손절 '}
-            <span className={slAboveEntry ? 'text-amber-400 font-semibold' : 'text-down font-semibold'}>
-              {slAboveEntry ? '+' : '-'}{slPct}%
-            </span>
+            {slAboveEntry ? (
+              <Tooltip text="손절가가 진입가보다 위로 올라간 상태입니다. 가격이 하락해도 최소한의 수익이 보장됩니다. (Trailing Stop / SL Protection)">
+                <span>SL보호 <span className="text-amber-400 font-semibold">+{slPct}%</span></span>
+              </Tooltip>
+            ) : (
+              <Tooltip text="현재가가 진입가 대비 이 비율만큼 하락하면 자동 매도됩니다. (Stop Loss)">
+                <span>손절 <span className="text-down font-semibold">-{slPct}%</span></span>
+              </Tooltip>
+            )}
           </span>
-          <span>익절 <span className="text-up font-semibold">+{tpPct}%</span></span>
-          <span>AI점수 <span className="text-brand-400 font-semibold">{pos.score}점</span></span>
+          <Tooltip text="현재가가 진입가 대비 이 비율만큼 상승하면 수익을 확정하고 자동 매도됩니다. (Take Profit)">
+            <span>익절 <span className="text-up font-semibold">+{tpPct}%</span></span>
+          </Tooltip>
+          <Tooltip text="AI가 진입 시점에 평가한 매수 신호 점수입니다. RSI, MACD, EMA 등 기술 지표와 거래량을 종합 분석합니다.">
+            <span>AI점수 <span className="text-brand-400 font-semibold">{pos.score}점</span></span>
+          </Tooltip>
         </span>
       </div>
       <p className="text-xs text-slate-400">{meta.desc}</p>
@@ -521,11 +583,12 @@ function StrategyBanner({ pos }: { pos: AutoBotPosition }) {
 }
 
 function InfoBox({
-  label, value, color,
+  label, value, color, tooltip,
 }: {
   label: string
   value: string
   color?: 'up' | 'down' | 'amber' | 'brand'
+  tooltip?: string
 }) {
   const colorMap: Record<string, string> = {
     up: 'text-up', down: 'text-down', amber: 'text-amber-400', brand: 'text-brand-400',
@@ -534,7 +597,10 @@ function InfoBox({
 
   return (
     <div className="bg-surface-700 rounded px-2.5 py-2">
-      <p className="text-slate-500 mb-0.5">{label}</p>
+      <p className="text-slate-500 mb-0.5 flex items-center gap-1">
+        {label}
+        {tooltip && <Tooltip text={tooltip} iconOnly />}
+      </p>
       <p className={clsx('font-semibold font-mono text-xs', colorClass)}>{value}</p>
     </div>
   )

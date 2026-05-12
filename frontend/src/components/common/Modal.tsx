@@ -6,9 +6,10 @@ interface Props {
   children: ReactNode
   onClose: () => void
   wide?: boolean
+  overflowVisible?: boolean
 }
 
-export default function Modal({ title, children, onClose, wide }: Props) {
+export default function Modal({ title, children, onClose, wide, overflowVisible }: Props) {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', handler)
@@ -25,7 +26,7 @@ export default function Modal({ title, children, onClose, wide }: Props) {
             <X size={20} />
           </button>
         </div>
-        <div className="p-5 overflow-y-auto">{children}</div>
+        <div className={overflowVisible ? 'p-5 overflow-visible' : 'p-5 overflow-y-auto flex-1 min-h-0'}>{children}</div>
       </div>
     </div>
   )

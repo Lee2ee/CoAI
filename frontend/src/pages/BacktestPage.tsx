@@ -9,6 +9,12 @@ import clsx from 'clsx'
 
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h', '1d']
 
+const EXCHANGES = [
+  { id: 'upbit',   label: 'Upbit',   fee: 0.05 },
+  { id: 'binance', label: 'Binance', fee: 0.10 },
+  { id: 'bybit',   label: 'Bybit',   fee: 0.10 },
+]
+
 interface Props {
   initialConfig?: StrategyConfig
 }
@@ -106,9 +112,18 @@ export default function BacktestPage({ initialConfig }: Props) {
   const [stopLoss, setStopLoss] = useState(initialConfig?.risk?.stop_loss_pct ?? 2.0)
   const [takeProfit, setTakeProfit] = useState(initialConfig?.risk?.take_profit_pct ?? 5.0)
   const [positionSize, setPositionSize] = useState(initialConfig?.risk?.position_size_pct ?? 10.0)
+  const [exchange, setExchange] = useState(initialConfig?.exchange ?? 'upbit')
   const [initialCapital, setInitialCapital] = useState(1_000_000)
-  const [feeRate, setFeeRate] = useState(0.0005)  // 업비트 수수료 0.05%
+  const [feeRate, setFeeRate] = useState(
+    EXCHANGES.find(e => e.id === (initialConfig?.exchange ?? 'upbit'))?.fee ?? 0.05
+  )
   const [walkForward, setWalkForward] = useState(false)
+
+  const handleExchangeChange = (id: string) => {
+    setExchange(id)
+    const defaultFee = EXCHANGES.find(e => e.id === id)?.fee ?? 0.0005
+    setFeeRate(defaultFee)
+  }
   const [result, setResult] = useState<BacktestResult | null>(null)
   const [configOpen, setConfigOpen] = useState(!initialConfig)
 
@@ -125,16 +140,16 @@ export default function BacktestPage({ initialConfig }: Props) {
     const config: StrategyConfig = {
       symbol,
       timeframe,
-      exchange: 'upbit',
+      exchange,
       entry_conditions: entryConditions,
       exit_conditions: exitConditions,
       risk: { stop_loss_pct: stopLoss, take_profit_pct: takeProfit, position_size_pct: positionSize },
     }
     mutation.mutate({
       strategy_config: config,
-      exchange: 'upbit',
+      exchange,
       initial_capital: initialCapital,
-      fee_rate: feeRate,
+      fee_rate: feeRate / 100,
       walk_forward: walkForward,
     })
   }
@@ -209,15 +224,49 @@ export default function BacktestPage({ initialConfig }: Props) {
       {/* 백테스트 파라미터 */}
       <div className="card space-y-4">
         <h2 className="font-semibold text-slate-100">백테스트 파라미터</h2>
+
+        {/* 거래소 선택 */}
+        <div>
+          <label className="text-xs text-slate-400 mb-2 block">거래소</label>
+          <div className="flex gap-2">
+            {EXCHANGES.map(ex => (
+              <button
+                key={ex.id}
+                type="button"
+                onClick={() => handleExchangeChange(ex.id)}
+                className={clsx(
+                  'flex-1 py-2 rounded-lg border text-xs font-medium transition-colors',
+                  exchange === ex.id
+                    ? 'bg-brand-500/20 border-brand-500 text-brand-300'
+                    : 'bg-surface-700 border-surface-600 text-slate-400 hover:border-surface-500'
+                )}
+              >
+                {ex.label}
+                <span className="block text-xs font-normal opacity-70 mt-0.5">{ex.fee}%</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="text-xs text-slate-400 mb-1 block">초기 자본 (₩)</label>
-            <input type="number" className="input"
-              value={initialCapital} onChange={e => setInitialCapital(Number(e.target.value))} />
+            <input
+              type="text"
+              inputMode="numeric"
+              className="input"
+              value={initialCapital.toLocaleString('ko-KR')}
+              onChange={e => {
+                const n = Number(e.target.value.replace(/,/g, ''))
+                if (!isNaN(n)) setInitialCapital(n)
+              }}
+            />
           </div>
           <div>
-            <label className="text-xs text-slate-400 mb-1 block">수수료율 (업비트 기본 0.05%)</label>
-            <input type="number" className="input" step="0.0001"
+            <label className="text-xs text-slate-400 mb-1 block">
+              수수료율 (%) · {EXCHANGES.find(e => e.id === exchange)?.label} 기본 {EXCHANGES.find(e => e.id === exchange)?.fee}%
+            </label>
+            <input type="number" className="input" step="0.01"
               value={feeRate} onChange={e => setFeeRate(Number(e.target.value))} />
           </div>
         </div>
@@ -244,20 +293,33 @@ export default function BacktestPage({ initialConfig }: Props) {
       {/* 결과 */}
       {result && (
         <>
-          <div className="grid grid-cols-4 gap-3">
-            <StatCard label="총 거래" value={result.total_trades.toString()} />
-            <StatCard label="승률" value={`${result.win_rate.toFixed(1)}%`} color={result.win_rate >= 50 ? 'up' : 'down'} />
-            <StatCard
-              label="총 수익률"
-              value={`${result.total_pnl_pct >= 0 ? '+' : ''}${result.total_pnl_pct.toFixed(2)}%`}
-              color={result.total_pnl_pct >= 0 ? 'up' : 'down'}
-            />
-            <StatCard label="최대 낙폭" value={`-${result.max_drawdown_pct.toFixed(2)}%`} color="down" />
-            <StatCard label="샤프 비율" value={result.sharpe_ratio.toFixed(2)} />
-            <StatCard label="손익비" value={result.profit_factor === Infinity ? '∞' : result.profit_factor.toFixed(2)} />
-            <StatCard label="평균 수익률" value={`${result.avg_trade_pnl_pct.toFixed(2)}%`} />
-            <StatCard label="최대 연속 손실" value={`${result.max_consecutive_losses}회`} color="down" />
-          </div>
+          {(() => {
+            const finalEquity = result.equity_curve.length > 0 ? result.equity_curve[result.equity_curve.length - 1] : initialCapital
+            const profitKrw = finalEquity - initialCapital
+            const profitSign = profitKrw >= 0 ? '+' : ''
+            return (
+              <div className="grid grid-cols-4 gap-3">
+                <StatCard label="총 거래" value={result.total_trades.toString()} />
+                <StatCard label="승률" value={`${result.win_rate.toFixed(1)}%`} color={result.win_rate >= 50 ? 'up' : 'down'} />
+                <StatCard
+                  label="총 수익률"
+                  value={`${result.total_pnl_pct >= 0 ? '+' : ''}${result.total_pnl_pct.toFixed(2)}%`}
+                  color={result.total_pnl_pct >= 0 ? 'up' : 'down'}
+                />
+                <StatCard
+                  label="총 수익금 (₩)"
+                  value={`${profitSign}${Math.round(profitKrw).toLocaleString('ko-KR')}`}
+                  subValue={`최종 ${Math.round(finalEquity).toLocaleString('ko-KR')}₩`}
+                  color={profitKrw >= 0 ? 'up' : 'down'}
+                />
+                <StatCard label="최대 낙폭" value={`-${result.max_drawdown_pct.toFixed(2)}%`} color="down" />
+                <StatCard label="샤프 비율" value={result.sharpe_ratio.toFixed(2)} />
+                <StatCard label="손익비" value={result.profit_factor === Infinity ? '∞' : result.profit_factor.toFixed(2)} />
+                <StatCard label="평균 수익률" value={`${result.avg_trade_pnl_pct.toFixed(2)}%`} />
+                <StatCard label="최대 연속 손실" value={`${result.max_consecutive_losses}회`} color="down" />
+              </div>
+            )
+          })()}
 
           <EquityChart data={equityData} title="백테스트 자산 곡선 (₩)" />
 
@@ -298,9 +360,30 @@ export default function BacktestPage({ initialConfig }: Props) {
           <div className="card">
             <h3 className="text-sm font-semibold text-slate-300 mb-3">개별 거래 ({result.trades.length}건)</h3>
             {result.trades.length === 0 ? (
-              <p className="text-slate-500 text-sm text-center py-4">
-                해당 기간에 거래 신호가 발생하지 않았습니다. 조건을 조정해보세요.
-              </p>
+              <div className="space-y-3 py-2">
+                <p className="text-slate-400 text-sm text-center">
+                  해당 기간에 진입 조건이 한 번도 충족되지 않았습니다.
+                </p>
+                {result.indicator_snapshot && result.indicator_snapshot.length > 0 && (
+                  <div className="bg-surface-700 rounded-lg p-3 space-y-1.5">
+                    <p className="text-xs text-slate-500 mb-2">마지막 캔들 기준 지표값</p>
+                    {result.indicator_snapshot.map((s, i) => {
+                      const val = typeof s.current_value === 'number' ? s.current_value.toFixed(2) : s.current_value
+                      return (
+                        <div key={i} className="flex items-center justify-between text-xs">
+                          <span className="text-slate-400">{s.label}</span>
+                          <span className="font-mono">
+                            <span className="text-slate-100">{val}</span>
+                            <span className="text-slate-500 mx-1">{s.operator}</span>
+                            <span className="text-brand-400">{s.threshold}</span>
+                          </span>
+                        </div>
+                      )
+                    })}
+                    <p className="text-xs text-slate-500 pt-1">조건을 완화하거나 타임프레임을 바꿔보세요.</p>
+                  </div>
+                )}
+              </div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
@@ -338,13 +421,14 @@ export default function BacktestPage({ initialConfig }: Props) {
   )
 }
 
-function StatCard({ label, value, color }: { label: string; value: string; color?: 'up' | 'down' }) {
+function StatCard({ label, value, subValue, color }: { label: string; value: string; subValue?: string; color?: 'up' | 'down' }) {
   return (
     <div className="card text-center">
       <p className="text-xs text-slate-400">{label}</p>
       <p className={clsx('text-lg font-bold mt-1', color === 'up' ? 'text-up' : color === 'down' ? 'text-down' : 'text-slate-100')}>
         {value}
       </p>
+      {subValue && <p className="text-xs text-slate-500 mt-0.5">{subValue}</p>}
     </div>
   )
 }

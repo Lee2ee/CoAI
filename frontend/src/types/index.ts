@@ -103,6 +103,7 @@ export interface BacktestResult {
   timestamps: string[]
   trades: BacktestTrade[]
   walk_forward_results?: WalkForwardResult[]
+  indicator_snapshot?: { label: string; current_value: number | string; operator: string; threshold: number | null }[]
 }
 
 export interface BacktestTrade {
@@ -162,7 +163,7 @@ export interface PositionEntry {
   price: number
   amount: number
   at: string
-  type: 'initial' | 'avg_down' | 'add'
+  type: 'initial' | 'avg_down' | 'add' | 'pyramid'
 }
 
 export interface AutoBotPosition {
@@ -175,6 +176,7 @@ export interface AutoBotPosition {
   current_price: number
   unrealized_pnl_pct: number
   unrealized_pnl_krw: number
+  total_fee_krw?: number
   entry_at: string
   score: number
   signals: string[]
@@ -184,6 +186,7 @@ export interface AutoBotPosition {
   position_style_label: string
   avg_down_count: number
   add_count: number
+  pyramid_count: number
 }
 
 export interface AutoBotTradeLog {
@@ -217,7 +220,10 @@ export interface ScanResult {
 }
 
 export interface AutoBotSettings {
+  exchange_id?: string
+  is_paper?: boolean
   trading_style: string
+  risk_profile?: string
   scan_interval_min: number
   max_positions: number
   position_size_pct: number
@@ -237,6 +243,36 @@ export interface AutoBotSettings {
   ai_exit_assist: boolean
   max_daily_loss_pct: number
   max_portfolio_exposure_pct: number
+  // 피라미딩
+  pyramid_enabled?: boolean
+  pyramid_threshold_pct?: number
+  max_pyramid?: number
+  // 선물 설정
+  market_type?: 'spot' | 'futures'
+  leverage?: number
+  margin_mode?: 'cross' | 'isolated'
+}
+
+export interface FuturesPosition {
+  symbol: string
+  side: 'long' | 'short'
+  entry_price: number
+  contracts: number
+  leverage: number
+  margin_mode: 'cross' | 'isolated'
+  initial_margin: number
+  liquidation_price: number | null
+  stop_loss_price: number
+  take_profit_price: number
+  current_price: number
+  unrealized_pnl_usdt: number
+  unrealized_pnl_pct: number
+  funding_rate: number
+  score: number
+  signals: string[]
+  strategy_type: string
+  strategy_label: string
+  entry_at: string
 }
 
 export interface AiAnalysisLogEntry {
@@ -277,12 +313,15 @@ export interface StylePreset {
 
 export interface AutoBotStatus {
   running: boolean
+  paused: boolean
   scan_in_progress: boolean
   positions: AutoBotPosition[]
+  futures_positions?: FuturesPosition[]
   trade_log: AutoBotTradeLog[]
   scan_results: ScanResult[]
   last_scan_at: string | null
   balance_krw: number
+  fee_rate: number
   total_value_krw: number
   unrealized_pnl_krw: number
   unrealized_pnl_pct: number
@@ -303,6 +342,10 @@ export interface AutoBotStatus {
   ai_analysis_log: AiAnalysisLogEntry[]
   performance: PerformanceStats
   daily_pnl_krw: number
+  // 선물 전용
+  market_type?: 'spot' | 'futures'
+  leverage?: number
+  margin_mode?: 'cross' | 'isolated'
 }
 
 export interface AutoBotTradeDB {

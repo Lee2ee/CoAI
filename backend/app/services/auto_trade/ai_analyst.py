@@ -32,8 +32,32 @@ CACHE_TTL: dict[str, int] = {
     "exit":   300,   # 5분
 }
 
+# ── 런타임 설정 (DB에서 주입, 파일보다 우선) ──────────────────────────────
+_runtime_cfg: dict | None = None
+
+
+def set_config(cfg: dict) -> None:
+    """
+    AI 설정을 런타임 메모리에 주입.
+    설정 저장 시 즉시 호출 → 재시작 없이 모든 프로바이더 즉시 적용.
+    """
+    global _runtime_cfg
+    _runtime_cfg = {
+        "provider":   cfg.get("provider", "ollama"),
+        "model":      cfg.get("model", "llama3.2"),
+        "api_key":    cfg.get("api_key", ""),
+        "ollama_url": cfg.get("ollama_url", "http://localhost:11434"),
+    }
+    # 프로바이더/모델이 바뀌면 LLM 응답 캐시도 초기화
+    _cache.clear()
+    logger.info(f"AI 설정 갱신: provider={_runtime_cfg['provider']} model={_runtime_cfg['model']}")
+
 
 def _load_cfg() -> dict:
+    # 1순위: 런타임 주입값 (DB에서 저장 시 갱신됨)
+    if _runtime_cfg is not None:
+        return _runtime_cfg
+    # 2순위: 파일 (이전 방식 호환 / 서버 첫 시작)
     if _SETTINGS_FILE.exists():
         try:
             return json.loads(_SETTINGS_FILE.read_text(encoding="utf-8"))
@@ -227,7 +251,7 @@ async def check_entry(
         )
         return result
     except Exception as e:
-        logger.debug(f"AI 진입 확인 실패 ({symbol}): {e}")
+        logger.warning(f"AI 진입 확인 실패 ({symbol}): {e}")
         return {"enter": True, "confidence": 70, "size_multiplier": 1.0, "reason": "AI 분석 실패 - 기본값"}
 
 
@@ -279,7 +303,7 @@ async def choose_position_style(
         logger.info(f"AI 포지션 스타일 {symbol}: {style} ({result['reason']})")
         return result
     except Exception as e:
-        logger.debug(f"AI 스타일 선택 실패 ({symbol}): {e}")
+        logger.warning(f"AI 스타일 선택 실패 ({symbol}): {e}")
         return {"style": global_style, "reason": "AI 미응답 - 글로벌 스타일 사용"}
 
 
@@ -349,7 +373,7 @@ async def detect_regime(
         )
         return result
     except Exception as e:
-        logger.debug(f"AI 국면 감지 실패: {e}")
+        logger.warning(f"AI 국면 감지 실패: {e}")
         return {"regime": "ranging", "style": "short", "min_score_delta": 0, "reason": "AI 분석 실패"}
 
 
@@ -403,7 +427,7 @@ async def analyze_losses(
         )
         return result
     except Exception as e:
-        logger.debug(f"AI 손절 분석 실패: {e}")
+        logger.warning(f"AI 손절 분석 실패: {e}")
         return {"issue": "MARKET_CONDITION", "sl_pct_delta": 0.5, "min_score_delta": 5, "reason": "AI 분석 실패"}
 
 
@@ -455,5 +479,5 @@ async def check_exit(
             logger.info(f"AI 청산 보조 {symbol}: {action} ({result['reason']})")
         return result
     except Exception as e:
-        logger.debug(f"AI 청산 보조 실패 ({symbol}): {e}")
+        logger.warning(f"AI 청산 보조 실패 ({symbol}): {e}")
         return {"action": "hold", "reason": "AI 분석 실패"}
