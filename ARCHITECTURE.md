@@ -137,6 +137,12 @@ asyncio.gather() → 보유 종목 현재가 병렬 조회
 | OpenAI (GPT) | 유료 | 범용 우수 |
 | Gemini | 무료/유료 | Flash 모델 무료 포함 |
 
+### AI 전략 생성 규칙
+
+- `cross_above` / `cross_below` 신호는 **단독 조건**으로만 사용 (pulse 신호)
+- `<`, `>`, `<=`, `>=` 신호는 **다중 조건 AND** 조합 가능 (state 신호)
+- 두 종류를 AND 조합하면 동시 충족이 사실상 불가능 → 0거래 발생 (SYSTEM_PROMPT에서 차단)
+
 ### AI 기능 4종 (개별 ON/OFF)
 
 | 기능 | 설정 키 | 캐시 TTL | 트리거 |
@@ -168,7 +174,11 @@ backend/ai_settings.json  (재시작 없이 즉시 반영)
        ↓
 Strategy DB (SQLite)
        ├─ 백테스트 (Walk-Forward 분석)
+       │     ├─ 거래소별 수수료율 자동 적용 (Upbit 0.05% / Binance·Bybit 0.10%)
+       │     ├─ 총 수익금(₩) · 최종 자본 계산 및 반환
+       │     └─ 0거래 시 _snapshot(): 마지막 캔들 지표값 반환 (미충족 조건 진단)
        ├─ 지표 엔진 (compute_indicator / evaluate_conditions)
+       │     └─ MACD cross_above/cross_below: MACDh_* 컬럼 기반 교차 판정
        └─ APScheduler → 활성 전략 자동 실행 (paper/live)
 ```
 
@@ -250,8 +260,13 @@ _positions dict
 | Order | 전략 실행 주문 내역 |
 | Trade | 전략 실행 거래 내역 |
 | Position | 전략 실행 포지션 |
-| AutoBotTrade | 자동매매봇 청산 내역 (DB 영속) |
-| ExchangeAccount | 거래소 API 계정 (암호화 저장) |
+| AutoBotTrade | 자동매매봇 청산 내역 (DB 영속) · market_type / side / leverage / margin_mode 포함 |
+| ExchangeAccount | 거래소 API 계정 (AES-256 암호화 저장) · is_paper 플래그로 모의/실거래 구분 |
+
+### 스키마 마이그레이션
+
+`Base.metadata.create_all`은 기존 테이블에 새 컬럼을 추가하지 않습니다.
+`init_db()` 호출 시 `_migrate(conn)`이 실행되어 누락된 컬럼을 `ALTER TABLE ADD COLUMN`으로 자동 추가합니다.
 
 ---
 

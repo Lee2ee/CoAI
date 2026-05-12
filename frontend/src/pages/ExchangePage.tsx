@@ -3,8 +3,19 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Wifi, WifiOff, KeyRound, RefreshCw, Copy, ChevronDown } from 'lucide-react'
 import api from '../utils/api'
 import Modal from '../components/common/Modal'
+import ConfirmModal from '../components/common/ConfirmModal'
 import ExchangeAccountForm from '../components/Exchange/ExchangeAccountForm'
 import type { ExchangeAccount } from '../types'
+
+// 거래소별 표시 정보
+const EXCHANGE_META: Record<string, { name: string; quote: string; color: string; depositNote: string }> = {
+  upbit:   { name: 'Upbit',   quote: 'KRW',  color: 'text-blue-400',   depositNote: 'KRW 입금은 업비트 앱 → 입출금 → 원화 입금에서 계좌이체로 진행하세요.' },
+  binance: { name: 'Binance', quote: 'USDT', color: 'text-yellow-400', depositNote: 'USDT 또는 코인을 Binance 앱/웹에서 입금하세요.' },
+  bybit:   { name: 'Bybit',   quote: 'USDT', color: 'text-orange-400', depositNote: 'USDT 또는 코인을 Bybit 앱/웹에서 입금하세요.' },
+}
+
+const getExchangeMeta = (exchange: string) =>
+  EXCHANGE_META[exchange] ?? { name: exchange, quote: 'USDT', color: 'text-slate-300', depositNote: '거래소 앱을 통해 입금하세요.' }
 
 interface Balance {
   currency: string
@@ -19,7 +30,7 @@ interface DepositAddress {
   tag: string | null
 }
 
-function BalancePanel({ accountId }: { accountId: number }) {
+function BalancePanel({ accountId, quote }: { accountId: number; quote: string }) {
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ['balance', accountId],
     queryFn: async () => {
@@ -32,6 +43,12 @@ function BalancePanel({ accountId }: { accountId: number }) {
   const errMsg = isError
     ? ((error as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? '잔고 조회 실패')
     : null
+
+  const formatAmount = (currency: string, amount: number) => {
+    if (currency === 'KRW') return amount.toLocaleString('ko-KR') + ' ₩'
+    if (currency === 'USDT') return '$' + amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    return amount.toFixed(8).replace(/\.?0+$/, '')
+  }
 
   return (
     <div className="space-y-2">
@@ -54,14 +71,11 @@ function BalancePanel({ accountId }: { accountId: number }) {
         <p className="text-xs text-slate-500">보유 자산 없음</p>
       ) : (
         <div className="space-y-1">
-          {data.map((b) => (
+          {/* quote 통화 맨 앞 */}
+          {[...data].sort((a, b) => (a.currency === quote ? -1 : b.currency === quote ? 1 : 0)).map((b) => (
             <div key={b.currency} className="flex items-center justify-between text-sm">
               <span className="text-slate-300 font-medium w-16">{b.currency}</span>
-              <span className="text-slate-100 font-mono">
-                {b.currency === 'KRW'
-                  ? b.free.toLocaleString('ko-KR') + ' ₩'
-                  : b.free.toFixed(8).replace(/\.?0+$/, '')}
-              </span>
+              <span className="text-slate-100 font-mono">{formatAmount(b.currency, b.free)}</span>
               {b.used > 0 && (
                 <span className="text-xs text-slate-500 ml-2">주문중 {b.used}</span>
               )}
@@ -73,7 +87,8 @@ function BalancePanel({ accountId }: { accountId: number }) {
   )
 }
 
-function DepositPanel({ accountId }: { accountId: number }) {
+function DepositPanel({ accountId, exchange }: { accountId: number; exchange: string }) {
+  const meta = getExchangeMeta(exchange)
   const [open, setOpen] = useState(false)
   const [currency, setCurrency] = useState('BTC')
   const [fetched, setFetched] = useState<DepositAddress | null>(null)
@@ -81,7 +96,7 @@ function DepositPanel({ accountId }: { accountId: number }) {
   const [err, setErr] = useState('')
   const [copied, setCopied] = useState(false)
 
-  const CRYPTOS = ['BTC', 'ETH', 'XRP', 'USDT']
+  const CRYPTOS = exchange === 'upbit' ? ['BTC', 'ETH', 'XRP', 'USDT'] : ['BTC', 'ETH', 'USDT', 'XRP']
 
   const fetchAddress = async () => {
     setLoading(true)
@@ -117,9 +132,9 @@ function DepositPanel({ accountId }: { accountId: number }) {
 
       {open && (
         <div className="mt-3 space-y-3">
-          {/* KRW 안내 */}
+          {/* 거래소별 입금 안내 */}
           <div className="bg-surface-700 rounded-lg px-3 py-2 text-xs text-slate-400">
-            KRW 입금은 업비트 앱 → 입출금 → 원화 입금에서 계좌이체로 진행하세요.
+            {meta.depositNote}
           </div>
 
           {/* 코인 선택 */}
@@ -180,6 +195,7 @@ export default function ExchangePage() {
   const [showForm, setShowForm] = useState(false)
   const [testResults, setTestResults] = useState<Record<number, { ok: boolean; msg: string }>>({})
   const [testing, setTesting] = useState<number | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<ExchangeAccount | null>(null)
 
   const { data: accounts = [], isLoading } = useQuery({
     queryKey: ['exchange-accounts'],
@@ -196,12 +212,17 @@ export default function ExchangePage() {
 
   const testConnection = async (account: ExchangeAccount) => {
     setTesting(account.id)
+    const meta = getExchangeMeta(account.exchange)
     try {
       const res = await api.get(`/exchange-accounts/${account.id}/test`)
+      const price = res.data.btc_price
+      const priceStr = meta.quote === 'KRW'
+        ? price?.toLocaleString('ko-KR') + ' ₩'
+        : '$' + price?.toLocaleString('en-US', { minimumFractionDigits: 0 })
       setTestResults((prev) => ({
         ...prev,
         [account.id]: res.data.ok
-          ? { ok: true, msg: `연결 성공 · BTC ${res.data.btc_price?.toLocaleString('ko-KR')} ₩` }
+          ? { ok: true, msg: `연결 성공 · BTC ${priceStr}` }
           : { ok: false, msg: res.data.error || '연결 실패' },
       }))
     } catch {
@@ -216,6 +237,17 @@ export default function ExchangePage() {
 
   return (
     <div className="space-y-4">
+      {deleteTarget && (
+        <ConfirmModal
+          message={`'${deleteTarget.label}' 계정을 삭제하시겠습니까?`}
+          detail="삭제 후에는 복구할 수 없으며, 연결된 자동매매도 중단됩니다."
+          confirmText="삭제"
+          variant="danger"
+          onConfirm={() => deleteMutation.mutate(deleteTarget.id)}
+          onClose={() => setDeleteTarget(null)}
+        />
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-slate-100">거래소 계정</h1>
@@ -233,7 +265,7 @@ export default function ExchangePage() {
         <div className="card text-center py-12">
           <KeyRound size={40} className="mx-auto text-slate-600 mb-3" />
           <p className="text-slate-400">등록된 거래소 계정이 없습니다.</p>
-          <p className="text-slate-500 text-sm mt-1">계정 추가 버튼을 눌러 업비트 API 키를 등록하세요.</p>
+          <p className="text-slate-500 text-sm mt-1">계정 추가 버튼을 눌러 거래소 API 키를 등록하세요.</p>
           <button onClick={() => setShowForm(true)} className="btn-primary mt-4">
             계정 추가
           </button>
@@ -241,6 +273,7 @@ export default function ExchangePage() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {accounts.map((account) => {
+            const meta = getExchangeMeta(account.exchange)
             const testResult = testResults[account.id]
             const isTesting = testing === account.id
 
@@ -250,7 +283,8 @@ export default function ExchangePage() {
                 <div className="flex items-start justify-between">
                   <div>
                     <div className="flex items-center gap-2">
-                      <span className="font-semibold text-base text-blue-400">Upbit</span>
+                      <span className={`font-semibold text-base ${meta.color}`}>{meta.name}</span>
+                      <span className="text-xs text-slate-500 font-mono">{meta.quote}</span>
                       <span className={`text-xs px-2 py-0.5 rounded font-medium ${
                         account.is_paper
                           ? 'bg-amber-500/20 text-amber-400'
@@ -265,11 +299,7 @@ export default function ExchangePage() {
                     <p className="text-sm text-slate-300 mt-0.5">{account.label}</p>
                   </div>
                   <button
-                    onClick={() => {
-                      if (confirm('이 거래소 계정을 삭제하시겠습니까?')) {
-                        deleteMutation.mutate(account.id)
-                      }
-                    }}
+                    onClick={() => setDeleteTarget(account)}
                     className="text-slate-500 hover:text-down transition-colors p-1"
                   >
                     <Trash2 size={16} />
@@ -283,7 +313,7 @@ export default function ExchangePage() {
                 </div>
 
                 {/* 잔고 (실거래만) */}
-                {!account.is_paper && <BalancePanel accountId={account.id} />}
+                {!account.is_paper && <BalancePanel accountId={account.id} quote={meta.quote} />}
 
                 {/* 연결 테스트 결과 */}
                 {testResult && (
@@ -306,7 +336,7 @@ export default function ExchangePage() {
                 </button>
 
                 {/* 입금 (실거래만) */}
-                {!account.is_paper && <DepositPanel accountId={account.id} />}
+                {!account.is_paper && <DepositPanel accountId={account.id} exchange={account.exchange} />}
               </div>
             )
           })}
@@ -314,7 +344,7 @@ export default function ExchangePage() {
       )}
 
       {showForm && (
-        <Modal title="업비트 계정 추가" onClose={() => setShowForm(false)}>
+        <Modal title="거래소 계정 추가" onClose={() => setShowForm(false)}>
           <ExchangeAccountForm onClose={() => setShowForm(false)} />
         </Modal>
       )}

@@ -112,7 +112,13 @@ def evaluate_condition(df: pd.DataFrame, condition: dict) -> bool:
     operator = condition["operator"]
     value = condition.get("value")
 
-    result = compute_indicator(df, indicator, params)
+    try:
+        result = compute_indicator(df, indicator, params)
+    except ValueError:
+        return False
+
+    if result is None:
+        return False
 
     # BB 밴드 크로스: 가격(close) vs 밴드 비교
     if indicator in ("BB_UPPER", "BB_LOWER") and operator in ("cross_above", "cross_below"):
@@ -131,25 +137,47 @@ def evaluate_condition(df: pd.DataFrame, condition: dict) -> bool:
 
     # 마지막 값 추출
     if isinstance(result, pd.DataFrame):
+        if result.empty or result.dropna().empty:
+            return False
         if operator in ("cross_above", "cross_below"):
-            # EMA_CROSS 등
-            series_fast = result["fast"]
-            series_slow = result["slow"]
+            # EMA_CROSS: "fast"/"slow" 컬럼이 있는 경우
+            if "fast" in result.columns and "slow" in result.columns:
+                series_fast = result["fast"]
+                series_slow = result["slow"]
+                if series_fast.dropna().empty or series_slow.dropna().empty or len(series_fast.dropna()) < 2:
+                    return False
+                if operator == "cross_above":
+                    return (
+                        series_fast.iloc[-1] > series_slow.iloc[-1]
+                        and series_fast.iloc[-2] <= series_slow.iloc[-2]
+                    )
+                else:
+                    return (
+                        series_fast.iloc[-1] < series_slow.iloc[-1]
+                        and series_fast.iloc[-2] >= series_slow.iloc[-2]
+                    )
+            # MACD 히스토그램 크로스 (MACDh_* 컬럼 우선)
+            hist_cols = [c for c in result.columns if c.startswith("MACDh")]
+            col = hist_cols[0] if hist_cols else result.columns[0]
+            valid = result[col].dropna()
+            if len(valid) < 2:
+                return False
+            prev_val, cur_val = float(valid.iloc[-2]), float(valid.iloc[-1])
             if operator == "cross_above":
-                return (
-                    series_fast.iloc[-1] > series_slow.iloc[-1]
-                    and series_fast.iloc[-2] <= series_slow.iloc[-2]
-                )
+                return prev_val <= float(value) < cur_val
             else:
-                return (
-                    series_fast.iloc[-1] < series_slow.iloc[-1]
-                    and series_fast.iloc[-2] >= series_slow.iloc[-2]
-                )
-        # MACD 히스토그램 기준
-        col = result.columns[0]
-        current = result[col].iloc[-1]
+                return prev_val >= float(value) > cur_val
+        # 비교 연산자: MACD는 히스토그램, STOCH는 첫 번째 컬럼(%K)
+        hist_cols = [c for c in result.columns if c.startswith("MACDh")]
+        col = hist_cols[0] if hist_cols else result.columns[0]
+        valid = result[col].dropna()
+        if valid.empty:
+            return False
+        current = valid.iloc[-1]
     else:
-        current = result.iloc[-1]
+        if result is None or result.empty or result.dropna().empty:
+            return False
+        current = result.dropna().iloc[-1]
 
     if operator == "<":
         return float(current) < float(value)
@@ -162,10 +190,16 @@ def evaluate_condition(df: pd.DataFrame, condition: dict) -> bool:
     elif operator == "==":
         return float(current) == float(value)
     elif operator == "cross_above":
-        prev = result.iloc[-2]
+        valid = result.dropna()
+        if len(valid) < 2:
+            return False
+        prev = valid.iloc[-2]
         return float(prev) <= float(value) < float(current)
     elif operator == "cross_below":
-        prev = result.iloc[-2]
+        valid = result.dropna()
+        if len(valid) < 2:
+            return False
+        prev = valid.iloc[-2]
         return float(prev) >= float(value) > float(current)
 
     raise ValueError(f"Unsupported operator: {operator}")

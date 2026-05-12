@@ -23,9 +23,9 @@ async def run_backtest(
         await connector.close()
 
         if req.start_date:
-            df = df[df.index >= req.start_date]
+            df = df[df.index >= pd.Timestamp(req.start_date)]
         if req.end_date:
-            df = df[df.index <= req.end_date]
+            df = df[df.index <= pd.Timestamp(req.end_date)]
 
         if len(df) < 60:
             raise HTTPException(status_code=400, detail="Not enough data for backtest (need 60+ candles)")
@@ -78,7 +78,10 @@ async def run_backtest(
                 for t in result.trades
             ],
             walk_forward_results=walk_forward_results,
+            indicator_snapshot=result.indicator_snapshot or None,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
