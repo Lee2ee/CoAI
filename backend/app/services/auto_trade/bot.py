@@ -233,7 +233,7 @@ class AutoTradeBot:
             "position_size_pct": 25.0,
             "stop_loss_pct": 2.5,
             "take_profit_pct": 6.0,
-            "min_score": 55,
+            "min_score": 60,
             "timeframe": "1h",
             # 물타기
             "auto_avg_down": True,
@@ -1663,10 +1663,19 @@ class AutoTradeBot:
         - 반등 신호 강함 + 점수 유효 → 임계값 50% 완화 (더 일찍 진입)
         - 점수 붕괴 (min_score * 0.6 미만) → 차단 (추세 붕괴 방어)
         - 스캔 없음 → 설정 임계값 그대로 적용
+        물타기 임계값은 해당 포지션 SL보다 좁아야 발동 가능:
+        - pos의 SL이 avg_down_threshold보다 좁으면 threshold를 SL * 0.7로 제한
         """
         avg = pos["avg_price"]
         drop_pct = (avg - current_price) / avg * 100
         threshold = self.settings["avg_down_threshold_pct"]
+
+        # SL보다 넓은 threshold는 손절 후에야 발동 → SL * 0.7로 자동 제한
+        sl_price = pos.get("stop_loss_price", 0)
+        if sl_price > 0 and avg > 0:
+            sl_pct = (avg - sl_price) / avg * 100
+            if threshold >= sl_pct:
+                threshold = round(sl_pct * 0.7, 2)
 
         if scan is None:
             return drop_pct >= threshold
