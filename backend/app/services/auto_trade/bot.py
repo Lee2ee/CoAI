@@ -1156,20 +1156,21 @@ class AutoTradeBot:
                 # 하드코딩 70은 conservative/AI 국면 상향으로 min_score가 70+가 되면 진입 불가 버그 유발.
                 db_score = min(100, self.settings["min_score"] + 15)
                 extra.append({
-                    "symbol":           symbol,
-                    "score":            db_score,
-                    "rsi":              50.0,
-                    "price":            float(df["close"].iloc[-1]),
-                    "signals":          [f"DB전략 진입: {strat['name']}"],
-                    "strategy_type":    f"db_{strat['id']}",
-                    "strategy_label":   f"DB: {strat['name']}",
-                    "sl_pct":           risk.get("stop_loss_pct"),
-                    "tp_pct":           risk.get("take_profit_pct"),
-                    "style":            self.settings["trading_style"],
-                    "volume_ratio":     1.0,
-                    "price_change_pct": 0.0,
-                    "mtf_confirmed":    True,
-                    "mtf_trend":        "neutral",
+                    "symbol":             symbol,
+                    "score":              db_score,
+                    "rsi":                50.0,
+                    "price":              float(df["close"].iloc[-1]),
+                    "signals":            [f"DB전략 진입: {strat['name']}"],
+                    "strategy_type":      f"db_{strat['id']}",
+                    "strategy_label":     f"DB: {strat['name']}",
+                    "sl_pct":             risk.get("stop_loss_pct"),
+                    "tp_pct":             risk.get("take_profit_pct"),
+                    "position_size_pct":  risk.get("position_size_pct"),  # 전략별 자본금 비율
+                    "style":              self.settings["trading_style"],
+                    "volume_ratio":       1.0,
+                    "price_change_pct":   0.0,
+                    "mtf_confirmed":      True,
+                    "mtf_trend":          "neutral",
                 })
                 logger.info(f"AutoBot DB전략 신호: [{strat['name']}] {symbol}")
             except Exception as e:
@@ -1585,7 +1586,9 @@ class AutoTradeBot:
                     if kelly > 0:
                         kelly_invest = total_value * kelly * min(size_multiplier, 1.3)
 
-            invest_krw = kelly_invest if kelly_invest else krw * self.settings["position_size_pct"] / 100 * min(size_multiplier, 1.3)
+            # DB 전략에 position_size_pct가 있으면 우선 사용, 없으면 글로벌 설정
+            strategy_size_pct = scan_result.get("position_size_pct") or self.settings["position_size_pct"]
+            invest_krw = kelly_invest if kelly_invest else krw * strategy_size_pct / 100 * min(size_multiplier, 1.3)
             invest_krw = min(invest_krw, krw * 0.95)  # 잔고 95% 초과 금지
 
             min_invest = 5_000 if self._quote_currency == "KRW" else 5
