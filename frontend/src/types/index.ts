@@ -277,7 +277,7 @@ export interface FuturesPosition {
 
 export interface AiAnalysisLogEntry {
   at: string
-  type: 'regime_change' | 'loss_analysis' | 'entry_blocked' | 'exit_action' | 'surge_override'
+  type: 'regime_change' | 'loss_analysis' | 'entry_blocked' | 'exit_action' | 'surge_override' | 'performance_feedback'
   regime?: string
   style?: string
   reason?: string

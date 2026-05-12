@@ -49,7 +49,7 @@ TRADING_STYLE_PRESETS: dict[str, dict] = {
     },
     "short": {
         "label": "단타",
-        "timeframe": "1h",
+        "timeframe": "15m",
         "scan_interval_min": 5,
         "stop_loss_pct": 2.5,
         "take_profit_pct": 6.0,
@@ -209,6 +209,7 @@ class AutoTradeBot:
         # AI 기능 상태
         self._consecutive_losses: int = 0          # 연속 손절 카운터
         self._last_regime_at: float = 0.0          # 마지막 국면 감지 시각 (epoch)
+        self._last_perf_feedback_at: float = 0.0   # 마지막 성과 피드백 시각 (epoch)
         self._current_regime: dict = {             # 현재 시장 국면
             "regime": "ranging", "style": "short",
             "min_score_delta": 0, "reason": "초기화",
@@ -809,6 +810,8 @@ class AutoTradeBot:
         """현물 매매 사이클 (기존 로직)"""
         # 국면 감지를 먼저 실행 → 스타일 변경 후 스캔
         await self._run_regime_detection()
+        # 성과 피드백: 30분마다 실제 승률·R:R로 min_score 자동 보정
+        await self._run_performance_feedback()
 
         scan_results = await scan_market(
             timeframe=self.settings["timeframe"],
@@ -2340,6 +2343,62 @@ class AutoTradeBot:
             )
         except Exception as e:
             logger.debug(f"AutoBot 손절 분석 오류: {e}")
+
+    async def _run_performance_feedback(self):
+        """
+        30분마다 최근 거래 실적(승률·실효 R:R)을 측정해 min_score 자동 보정.
+
+        연속 손절이 아닌 산발적 손절 패턴(손-익-손-익-손)에도 대응.
+        - 승률 < 35% + 실효R:R < 1.5 → min_score +5 (진입 기준 강화)
+        - 승률 < 35%                   → min_score +3
+        - 승률 > 55% + 실효R:R > 2.0  → min_score -2 (기회 확대)
+        """
+        import time
+        if time.time() - self._last_perf_feedback_at < 1800:
+            return
+        self._last_perf_feedback_at = time.time()
+
+        recent = self._trade_log[:15]
+        if len(recent) < 5:
+            return
+
+        wins   = [t for t in recent if t["pnl_pct"] > 0]
+        losses = [t for t in recent if t["pnl_pct"] <= 0]
+        win_rate  = len(wins) / len(recent)
+        avg_win   = sum(t["pnl_pct"] for t in wins)   / len(wins)   if wins   else 0.0
+        avg_loss  = abs(sum(t["pnl_pct"] for t in losses) / len(losses)) if losses else 0.0
+        actual_rr = round(avg_win / avg_loss, 2) if avg_loss > 0 else 99.0
+
+        cur_score = self.settings["min_score"]
+        new_score = cur_score
+
+        if win_rate < 0.35 and actual_rr < 1.5:
+            new_score = min(75, cur_score + 5)
+        elif win_rate < 0.35:
+            new_score = min(75, cur_score + 3)
+        elif win_rate > 0.55 and actual_rr > 2.0:
+            new_score = max(55, cur_score - 2)
+
+        if new_score == cur_score:
+            return
+
+        self.settings["min_score"] = new_score
+        direction = "강화" if new_score > cur_score else "완화"
+        log_entry = {
+            "at":        datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+            "type":      "performance_feedback",
+            "win_rate":  round(win_rate * 100, 1),
+            "actual_rr": actual_rr,
+            "n_trades":  len(recent),
+            "changed":   [f"min_score {cur_score}→{new_score} (진입기준 {direction})"],
+        }
+        self._analysis_log.insert(0, log_entry)
+        if len(self._analysis_log) > 20:
+            self._analysis_log.pop()
+        logger.info(
+            f"AutoBot 성과 피드백: 승률={win_rate:.0%} 실효R:R={actual_rr:.2f} "
+            f"→ min_score {cur_score}→{new_score}"
+        )
 
     async def _save_trade_to_db(self, record: dict, pos: dict):
         try:
