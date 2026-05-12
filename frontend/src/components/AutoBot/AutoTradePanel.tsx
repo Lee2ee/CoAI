@@ -484,6 +484,53 @@ function SettingsModal({
             </div>
           </div>
 
+          {/* 퀀트 오버레이 */}
+          <div className="border-t border-surface-700 pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs text-slate-400 font-medium flex items-center gap-1">
+                퀀트 오버레이
+                <Tooltip text="변동성, 기대값, 전략별 성과, 비용 차감 후 엣지를 함께 반영해 진입 순위와 포지션 크기를 조정합니다." iconOnly />
+              </p>
+              <Toggle checked={form.quant_sizing_enabled ?? true} onChange={v => set('quant_sizing_enabled', v)} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <NumRow label="거래당 리스크 (%)" min={0.1} max={5} step={0.1}
+                value={form.risk_per_trade_pct ?? 0.8} onChange={v => set('risk_per_trade_pct', v)}
+                tooltip="손절이 발생했을 때 감수할 전체 자산 대비 최대 손실 비율입니다. 포지션 크기는 이 손실 한도를 넘지 않도록 계산됩니다." />
+              <NumRow label="최소 엣지 (%)" min={0} max={3} step={0.05}
+                value={form.min_edge_after_cost_pct ?? 0.15} onChange={v => set('min_edge_after_cost_pct', v)}
+                tooltip="수수료와 예상 슬리피지를 차감한 기대수익률 하한입니다. 낮추면 진입이 늘고, 높이면 더 엄격해집니다." />
+              <NumRow label="최소 랭크" min={40} max={90} step={1}
+                value={form.min_rank_score ?? 58} onChange={v => set('min_rank_score', v)}
+                tooltip="기술점수, 퀀트점수, 장세 적합도, 성과 이력을 합친 최종 진입 랭크의 하한입니다." />
+              <NumRow label="슬리피지 (%)" min={0} max={1} step={0.01}
+                value={form.expected_slippage_pct ?? 0.05} onChange={v => set('expected_slippage_pct', v)}
+                tooltip="진입 랭킹에서 비용으로 차감할 예상 체결 미끄러짐입니다." />
+              <NumRow label="최소 투입 (%)" min={0.1} max={20} step={0.5}
+                value={form.min_position_size_pct ?? 1} onChange={v => set('min_position_size_pct', v)}
+                tooltip="퀀트 포지션 계산 결과가 너무 작아도 최소한으로 허용할 투입 비율입니다." />
+              <NumRow label="최대 투입 (%)" min={1} max={80} step={1}
+                value={form.max_position_size_pct ?? 30} onChange={v => set('max_position_size_pct', v)}
+                tooltip="퀀트 포지션 계산 결과가 커져도 종목 1개에 허용할 최대 투입 비율입니다." />
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <div className="flex items-center justify-between rounded-lg border border-surface-700 bg-surface-800/70 px-3 py-2">
+                <span className="text-xs text-slate-400 flex items-center gap-1">
+                  동적 SL/TP
+                  <Tooltip text="고정 손절/익절 대신 ATR 기반 손절폭과 R-multiple 익절 목표를 사용합니다." iconOnly />
+                </span>
+                <Toggle checked={form.dynamic_sl_tp_enabled ?? true} onChange={v => set('dynamic_sl_tp_enabled', v)} />
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-surface-700 bg-surface-800/70 px-3 py-2">
+                <span className="text-xs text-slate-400 flex items-center gap-1">
+                  MDD 감속
+                  <Tooltip text="최근 낙폭이 커질수록 신규 진입 포지션 크기를 자동으로 낮춥니다." iconOnly />
+                </span>
+                <Toggle checked={form.drawdown_throttle_enabled ?? true} onChange={v => set('drawdown_throttle_enabled', v)} />
+              </div>
+            </div>
+          </div>
+
           {/* 지표 타임프레임 */}
           <div className="border-t border-surface-700 pt-4">
             <p className="text-xs text-slate-400 font-medium mb-2 flex items-center gap-1">
@@ -1567,6 +1614,7 @@ export default function AutoTradePanel() {
           <span>익절 <b className="text-up">{status.settings.take_profit_pct}%</b></span>
           <span>최대 <b className="text-slate-200">{status.settings.max_positions}개</b></span>
           <span>일손실한도 <b className="text-amber-400">{status.settings.max_daily_loss_pct ?? 5}%</b></span>
+          <span>퀀트 <b className={(status.settings.quant_sizing_enabled ?? true) ? 'text-brand-400' : 'text-slate-500'}>{(status.settings.quant_sizing_enabled ?? true) ? `ON (${status.settings.risk_per_trade_pct ?? 0.8}%)` : 'OFF'}</b></span>
           <span>물타기 <b className={status.settings.auto_avg_down ? 'text-amber-400' : 'text-slate-500'}>{status.settings.auto_avg_down ? `ON (${status.settings.avg_down_threshold_pct}%)` : 'OFF'}</b></span>
           <span>추매 <b className={status.settings.auto_add ? 'text-up' : 'text-slate-500'}>{status.settings.auto_add ? `ON (${status.settings.add_threshold_pct}%)` : 'OFF'}</b></span>
           <span>피라미딩 <b className={status.settings.pyramid_enabled ? 'text-brand-400' : 'text-slate-500'}>{status.settings.pyramid_enabled ? `ON (${status.settings.pyramid_threshold_pct ?? 3}%)` : 'OFF'}</b></span>

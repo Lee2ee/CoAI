@@ -23,11 +23,13 @@ const ENTRY_COLORS = {
   initial: '#3b82f6',   // 파란색 - 최초 진입
   avg_down: '#f59e0b',  // 주황색 - 물타기
   add: '#22c55e',       // 초록색 - 추매
+  pyramid: '#a855f7',   // 보라색 - 피라미딩
 }
 const ENTRY_LABELS = {
   initial: '진입',
   avg_down: '물타기',
   add: '추매',
+  pyramid: '피라미딩',
 }
 
 interface Props {
@@ -66,7 +68,7 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose, 
       })
       return res.data.data
     },
-    refetchInterval: 30_000,
+    refetchInterval: 10_000,
   })
 
   // 최신 OHLCV 참조 (WebSocket 핸들러 클로저 스테일 방지)

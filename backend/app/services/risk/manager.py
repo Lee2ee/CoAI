@@ -4,6 +4,7 @@
 RiskManager       : 개별 포지션 손절/익절/트레일링 스탑
 PortfolioRiskManager : 포트폴리오 레벨 리스크 (일일 손실 한도, 최대 노출)
 """
+
 import math
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
@@ -13,13 +14,22 @@ KST = timezone(timedelta(hours=9))
 
 class RiskManager:
     def __init__(self, config: dict):
-        self.stop_loss_pct = config.get("stop_loss_pct", 2.0)      # %
-        self.take_profit_pct = config.get("take_profit_pct", 4.0)  # %
-        self.trailing_stop = config.get("trailing_stop", False)
-        self.trailing_pct = config.get("trailing_pct", 1.5)        # %
+        config = config or {}
+        self.stop_loss_pct = config.get("stop_loss_pct", 1.5)  # 2.0% → 1.5% (더 엄격)
+        self.take_profit_pct = config.get(
+            "take_profit_pct", 6.0
+        )  # 4.0% → 6.0% (더 공격적)
+        self.trailing_stop = config.get("trailing_stop", True)  # 기본 활성화
+        self.trailing_pct = config.get("trailing_pct", 1.0)  # 1.5% → 1.0% (더 타이트)
+        self.max_daily_loss_pct = config.get(
+            "max_daily_loss_pct", 3.0
+        )  # 일일 손실 한도
         self._peak_price: Optional[float] = None
+        self._daily_pnl = 0.0
 
-    def calc_levels(self, entry_price: float, direction: str = "long") -> Tuple[float, float]:
+    def calc_levels(
+        self, entry_price: float, direction: str = "long"
+    ) -> Tuple[float, float]:
         """손절가, 익절가 계산"""
         if direction == "long":
             sl = entry_price * (1 - self.stop_loss_pct / 100)
@@ -30,12 +40,22 @@ class RiskManager:
         self._peak_price = entry_price
         return sl, tp
 
-    def check_exit(self, entry_price: float, current_price: float, direction: str = "long") -> Optional[str]:
+    def check_exit(
+        self, entry_price: float, current_price: float, direction: str = "long"
+    ) -> Optional[str]:
         """
         현재가 기준 청산 사유 반환.
         None이면 청산 불필요.
         """
-        sl, tp = self.calc_levels(entry_price, direction)
+        if direction == "long":
+            sl = entry_price * (1 - self.stop_loss_pct / 100)
+            tp = entry_price * (1 + self.take_profit_pct / 100)
+        else:
+            sl = entry_price * (1 + self.stop_loss_pct / 100)
+            tp = entry_price * (1 - self.take_profit_pct / 100)
+
+        if self._peak_price is None:
+            self._peak_price = entry_price
 
         if direction == "long":
             if self.trailing_stop and self._peak_price:
@@ -127,8 +147,7 @@ class PortfolioRiskManager:
         exposure_pct = total_invested_krw / total_value_krw * 100
         if exposure_pct >= max_exposure_pct:
             return False, (
-                f"포트폴리오 노출 한도 "
-                f"({exposure_pct:.0f}% ≥ {max_exposure_pct}%)"
+                f"포트폴리오 노출 한도 " f"({exposure_pct:.0f}% ≥ {max_exposure_pct}%)"
             )
 
         return True, ""
@@ -142,7 +161,7 @@ class PortfolioRiskManager:
         self,
         new_symbol: str,
         open_positions: list[str],
-        close_cache: dict,       # symbol → list[float] (1h 종가 리스트, 최신값이 마지막)
+        close_cache: dict,  # symbol → list[float] (1h 종가 리스트, 최신값이 마지막)
         threshold: float = 0.8,
     ) -> tuple[bool, str]:
         """
@@ -162,10 +181,16 @@ class PortfolioRiskManager:
                 continue
 
             n = min(len(new_closes), len(other_closes))
-            new_r   = [new_closes[-n + i] / new_closes[-n + i - 1] - 1
-                       for i in range(1, n) if new_closes[-n + i - 1] != 0]
-            other_r = [other_closes[-n + i] / other_closes[-n + i - 1] - 1
-                       for i in range(1, n) if other_closes[-n + i - 1] != 0]
+            new_r = [
+                new_closes[-n + i] / new_closes[-n + i - 1] - 1
+                for i in range(1, n)
+                if new_closes[-n + i - 1] != 0
+            ]
+            other_r = [
+                other_closes[-n + i] / other_closes[-n + i - 1] - 1
+                for i in range(1, n)
+                if other_closes[-n + i - 1] != 0
+            ]
 
             corr = _pearson(new_r, other_r)
             if corr > threshold:
@@ -182,7 +207,7 @@ def _pearson(x: list[float], y: list[float]) -> float:
     x, y = x[:n], y[:n]
     mx = sum(x) / n
     my = sum(y) / n
-    num   = sum((x[i] - mx) * (y[i] - my) for i in range(n))
+    num = sum((x[i] - mx) * (y[i] - my) for i in range(n))
     den_x = math.sqrt(sum((v - mx) ** 2 for v in x))
     den_y = math.sqrt(sum((v - my) ** 2 for v in y))
     if den_x == 0 or den_y == 0:
@@ -192,11 +217,12 @@ def _pearson(x: list[float], y: list[float]) -> float:
 
 # ── 성과 지표 계산 유틸 ──────────────────────────────────────────────────────
 
+
 def calc_futures_position_size(
     usdt_balance: float,
     leverage: int,
-    risk_pct: float = 0.02,   # 계좌 대비 최대 손실 허용 2%
-    sl_pct: float = 0.03,     # 손절선 3%
+    risk_pct: float = 0.02,  # 계좌 대비 최대 손실 허용 2%
+    sl_pct: float = 0.03,  # 손절선 3%
 ) -> float:
     """
     레버리지를 고려한 선물 투자금 계산.
@@ -209,7 +235,7 @@ def calc_futures_position_size(
     if sl_pct <= 0 or leverage <= 0:
         return 0.0
     invest = (risk_pct * usdt_balance) / (sl_pct * leverage)
-    max_invest = usdt_balance * 0.20   # 계좌 20% 상한
+    max_invest = usdt_balance * 0.20  # 계좌 20% 상한
     return round(min(invest, max_invest), 4)
 
 
@@ -273,27 +299,35 @@ def calc_performance(trade_log: list[dict], initial_capital: float = 1_000_000) 
       best_trade_pct, worst_trade_pct, total_trades
     """
     _zero = {
-        "sharpe_ratio": 0.0, "sortino_ratio": 0.0, "calmar_ratio": 0.0,
-        "profit_factor": 0.0, "expectancy_pct": 0.0, "max_drawdown_pct": 0.0,
+        "sharpe_ratio": 0.0,
+        "sortino_ratio": 0.0,
+        "calmar_ratio": 0.0,
+        "profit_factor": 0.0,
+        "expectancy_pct": 0.0,
+        "max_drawdown_pct": 0.0,
         "var_95": 0.0,
-        "avg_win_pct": 0.0, "avg_loss_pct": 0.0, "win_rate": 0.0,
-        "best_trade_pct": 0.0, "worst_trade_pct": 0.0, "total_trades": 0,
+        "avg_win_pct": 0.0,
+        "avg_loss_pct": 0.0,
+        "win_rate": 0.0,
+        "best_trade_pct": 0.0,
+        "worst_trade_pct": 0.0,
+        "total_trades": 0,
     }
     if not trade_log:
         return _zero
 
     pnl_list = [t["pnl_pct"] for t in trade_log]
-    wins  = [x for x in pnl_list if x > 0]
+    wins = [x for x in pnl_list if x > 0]
     losses = [x for x in pnl_list if x <= 0]
     n = len(pnl_list)
 
-    avg_win  = sum(wins)  / len(wins)  if wins  else 0.0
+    avg_win = sum(wins) / len(wins) if wins else 0.0
     avg_loss = sum(losses) / len(losses) if losses else 0.0  # 음수
     win_rate = len(wins) / n * 100
 
     # ── Profit Factor ────────────────────────────────────────────────────
     gross_profit = sum(wins)
-    gross_loss   = abs(sum(losses)) if losses else 0.0
+    gross_loss = abs(sum(losses)) if losses else 0.0
     profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 0.0
 
     # ── Expectancy ───────────────────────────────────────────────────────
@@ -311,7 +345,7 @@ def calc_performance(trade_log: list[dict], initial_capital: float = 1_000_000) 
 
         # Sortino: 하방 편차만 사용
         if losses:
-            downside_sq = sum(x ** 2 for x in losses) / len(losses)
+            downside_sq = sum(x**2 for x in losses) / len(losses)
             down_std = math.sqrt(downside_sq)
             if down_std > 0:
                 sortino = round(mean_r / down_std * math.sqrt(252), 2)
@@ -334,17 +368,17 @@ def calc_performance(trade_log: list[dict], initial_capital: float = 1_000_000) 
     calmar = round(mean_r * 252 / max_dd, 2) if max_dd > 0 else 0.0
 
     return {
-        "sharpe_ratio":     sharpe,
-        "sortino_ratio":    sortino,
-        "calmar_ratio":     calmar,
-        "profit_factor":    profit_factor,
-        "expectancy_pct":   expectancy,
+        "sharpe_ratio": sharpe,
+        "sortino_ratio": sortino,
+        "calmar_ratio": calmar,
+        "profit_factor": profit_factor,
+        "expectancy_pct": expectancy,
         "max_drawdown_pct": round(max_dd, 2),
-        "var_95":           calc_var(pnl_list),
-        "avg_win_pct":      round(avg_win, 2),
-        "avg_loss_pct":     round(avg_loss, 2),
-        "win_rate":         round(win_rate, 1),
-        "best_trade_pct":   round(max(pnl_list), 2),
-        "worst_trade_pct":  round(min(pnl_list), 2),
-        "total_trades":     n,
+        "var_95": calc_var(pnl_list),
+        "avg_win_pct": round(avg_win, 2),
+        "avg_loss_pct": round(avg_loss, 2),
+        "win_rate": round(win_rate, 1),
+        "best_trade_pct": round(max(pnl_list), 2),
+        "worst_trade_pct": round(min(pnl_list), 2),
+        "total_trades": n,
     }
