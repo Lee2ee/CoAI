@@ -60,15 +60,6 @@ PROVIDERS_META: dict = {
         "models": ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"],
         "key_url": "https://platform.openai.com/api-keys",
     },
-    "gemini": {
-        "label": "Gemini",
-        "desc": "Google Gemini. 무료 티어(Flash) 포함.",
-        "tier": "free",
-        "needs_key": True,
-        "needs_url": False,
-        "models": ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"],
-        "key_url": "https://aistudio.google.com/apikey",
-    },
 }
 
 
@@ -217,16 +208,6 @@ async def test_connection(
                 )
             ok = res.status_code == 200
             return {"ok": ok, "message": "OpenAI 연결 성공" if ok else f"OpenAI 오류: {res.status_code}"}
-
-        elif provider == "gemini":
-            if not api_key:
-                return {"ok": False, "message": "API 키가 설정되지 않았습니다."}
-            async with httpx.AsyncClient(timeout=10) as client:
-                res = await client.get(
-                    f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-                )
-            ok = res.status_code == 200
-            return {"ok": ok, "message": "Gemini 연결 성공" if ok else f"Gemini 오류: {res.status_code}"}
 
         return {"ok": False, "message": "알 수 없는 프로바이더"}
 

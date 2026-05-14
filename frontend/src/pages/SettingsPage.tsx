@@ -36,7 +36,6 @@ const PROVIDER_ICON: Record<string, string> = {
   groq:      '⚡',
   anthropic: '◆',
   openai:    '✦',
-  gemini:    '◈',
 }
 
 // ── 토글 컴포넌트 ─────────────────────────────────────────────────────────
