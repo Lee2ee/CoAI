@@ -1663,7 +1663,7 @@ class AutoTradeBot:
                         signals=candidate.get("signals", []),
                         rsi=candidate.get("rsi", 50.0),
                     )
-                    if not ai_result["enter"] or ai_result["confidence"] < 65:
+                    if not ai_result["enter"] or ai_result["confidence"] < 55:
                         logger.info(
                             f"AutoBot 초단타 AI 거부 {symbol}: "
                             f"confidence={ai_result['confidence']} reason={ai_result['reason']}"
