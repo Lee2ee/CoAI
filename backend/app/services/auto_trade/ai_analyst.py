@@ -115,8 +115,6 @@ async def _call(prompt: str, max_tokens: int = 120, timeout: float = 25.0) -> st
             return await asyncio.wait_for(_openai_compat(prompt, cfg, max_tokens), timeout=timeout)
         elif provider == "anthropic":
             return await asyncio.wait_for(_anthropic(prompt, cfg, max_tokens), timeout=timeout)
-        elif provider == "gemini":
-            return await asyncio.wait_for(_gemini(prompt, cfg, max_tokens), timeout=timeout)
         else:
             raise ValueError(f"Unknown provider: {provider}")
     except asyncio.TimeoutError:
@@ -180,21 +178,6 @@ async def _anthropic(prompt: str, cfg: dict, max_tokens: int) -> str:
         res.raise_for_status()
     return res.json()["content"][0]["text"]
 
-
-async def _gemini(prompt: str, cfg: dict, max_tokens: int) -> str:
-    api_key = cfg.get("api_key", "")
-    model = cfg.get("model", "gemini-2.0-flash")
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": max_tokens},
-    }
-    async with httpx.AsyncClient(timeout=20) as client:
-        res = await client.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
-            json=payload,
-        )
-        res.raise_for_status()
-    return res.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
 # ══════════════════════════════════════════════════════════════════════════

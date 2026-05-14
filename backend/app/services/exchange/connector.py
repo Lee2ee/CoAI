@@ -175,7 +175,11 @@ class PaperBroker:
     """
     모의 거래 브로커.
     실제 거래소 시세 데이터를 기반으로 주문을 가상 체결.
+    슬리피지(bid/ask spread 근사)를 적용해 실거래와 유사한 환경을 시뮬레이션.
     """
+
+    # 매수: ask ≈ last * (1 + spread), 매도: bid ≈ last * (1 - spread)
+    SLIPPAGE_RATE = 0.001   # 0.1% — 업비트 소형 코인 평균 spread 근사
 
     def __init__(self, initial_balance: float = 10_000.0, fee_rate: float = EXCHANGE_FEES["upbit"]):
         self.balance = {"USDT": initial_balance}
@@ -192,8 +196,13 @@ class PaperBroker:
     ) -> dict:
         quote = symbol.split("/")[1] if "/" in symbol else "USDT"
         base = symbol.split("/")[0]
-        fee = amount * current_price * self.fee_rate
-        cost = amount * current_price + fee
+        # 슬리피지 적용: 매수는 ask(+0.1%), 매도는 bid(-0.1%)
+        if side == "buy":
+            fill_price = current_price * (1 + self.SLIPPAGE_RATE)
+        else:
+            fill_price = current_price * (1 - self.SLIPPAGE_RATE)
+        fee = amount * fill_price * self.fee_rate
+        cost = amount * fill_price + fee
 
         if side == "buy":
             if self.balance.get(quote, 0) < cost:
@@ -205,7 +214,7 @@ class PaperBroker:
                 raise ValueError(f"{base} 잔고 부족: {amount:.6f} 필요")
             self.balance[base] = self.balance.get(base, 0) - amount
             self.balance[quote] = (
-                self.balance.get(quote, 0) + amount * current_price - fee
+                self.balance.get(quote, 0) + amount * fill_price - fee
             )
 
         order = {
@@ -214,7 +223,7 @@ class PaperBroker:
             "side": side,
             "type": "market",
             "amount": amount,
-            "price": current_price,
+            "price": fill_price,
             "filled": amount,
             "fee": fee,
             "status": "closed",
@@ -347,7 +356,10 @@ class FuturesPaperBroker:
     """
     선물 모의 거래 브로커.
     USDT 증거금 방식 (Isolated Margin 근사). 롱/숏 양방향 지원.
+    슬리피지(bid/ask spread 근사)를 적용해 실거래와 유사한 환경을 시뮬레이션.
     """
+
+    SLIPPAGE_RATE = 0.0005  # 0.05% — 선물은 현물보다 spread 좁음
 
     def __init__(self, initial_balance: float = 1_000.0):
         self.usdt_balance: float = initial_balance
@@ -367,6 +379,9 @@ class FuturesPaperBroker:
         leverage: int,
         price: float,
     ) -> dict:
+        # 슬리피지: 롱 진입은 ask(+), 숏 진입은 bid(-)
+        fill_price = price * (1 + self.SLIPPAGE_RATE) if side == "long" else price * (1 - self.SLIPPAGE_RATE)
+        price = fill_price
         contracts = (usdt_amount * leverage) / price
         fee = contracts * price * self.fee_rate
         required = usdt_amount + fee
@@ -413,6 +428,8 @@ class FuturesPaperBroker:
         contracts = pos["contracts"]
         entry     = pos["entry_price"]
         side      = pos["side"]
+        # 슬리피지: 롱 청산은 bid(-), 숏 청산은 ask(+)
+        price = price * (1 - self.SLIPPAGE_RATE) if side == "long" else price * (1 + self.SLIPPAGE_RATE)
         exit_fee  = contracts * price * self.fee_rate
 
         raw_pnl = (
