@@ -455,6 +455,22 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
     스타일별 가중치를 적용하여 해당 매매 방식에 맞는 신호를 우선시한다.
     """
     try:
+        # ── 미완성 현재봉 제외 (bar-close strategy) ──────────────────────────
+        # 신호 감지는 반드시 닫힌 봉 기준으로만 수행.
+        # 미완성봉 포함 시: MACD 크로스가 봉 마감 전 사라지거나 고점 진입 유발.
+        # 진입 가격은 _open_position에서 실시간 ticker로 별도 조회하므로 무관.
+        current_price = float(df["close"].iloc[-1])
+        df = df.iloc[:-1]
+        if len(df) < 60:
+            return {
+                "symbol": symbol, "score": 0, "rsi": 50.0, "price": current_price,
+                "signals": [], "strategy_type": "standard", "strategy_label": "표준",
+                "sl_pct": None, "tp_pct": None, "style": style,
+                "volume_ratio": 0.0, "price_change_pct": 0.0,
+                "mtf_trend": "neutral", "mtf_confirmed": True,
+                "adx": 0.0, "mr_score": 0, "mr_signals": [], "bb_mid": 0.0, "bb_lower": 0.0,
+            }
+
         weights = STYLE_SCORE_WEIGHTS.get(style, STYLE_SCORE_WEIGHTS["short"])
         close = df["close"]
         volume = df["volume"]
@@ -551,9 +567,9 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         score += int(vol_pts * weights["volume"])
 
         # ── 최근 3봉 가격 변화율 (급등 감지용) ─────────────────────────────
-        price_now = float(close.iloc[-1])
-        price_3ago = float(close.iloc[-4]) if len(close) >= 4 else price_now
-        price_change_pct_val = (price_now - price_3ago) / price_3ago * 100 if price_3ago > 0 else 0.0
+        # current_price: 실시간 현재가 / close.iloc[-3]: 3 확정봉 전 종가
+        price_3ago = float(close.iloc[-3]) if len(close) >= 4 else current_price
+        price_change_pct_val = (current_price - price_3ago) / price_3ago * 100 if price_3ago > 0 else 0.0
 
         # ── 기본 캔들 패턴 감지 ─────────────────────────────────────────────
         candle_signals, candle_pts = _detect_candle_patterns(df)
@@ -644,6 +660,20 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         sl_pct = style_cfg.get("sl_pct")
         tp_pct = style_cfg.get("tp_pct")
 
+        # ── ATR 기반 SL 하한 보정 ───────────────────────────────────────────
+        # 고정 SL이 코인 변동성(ATR)보다 좁으면 정상 흔들림에 손절 발동.
+        # sl_pct < 1.5 * ATR% 이면 ATR 기준으로 확대하고 TP도 2:1 R:R 유지.
+        try:
+            atr_s = ta.atr(df["high"], df["low"], close, length=14)
+            if atr_s is not None and not atr_s.empty:
+                atr_pct = float(atr_s.dropna().iloc[-1]) / current_price * 100
+                if sl_pct is not None and sl_pct < atr_pct * 1.5:
+                    sl_pct = round(atr_pct * 1.5, 2)
+                    if tp_pct is not None:
+                        tp_pct = max(tp_pct, round(sl_pct * 2.0, 2))
+        except Exception:
+            pass
+
         # ── 멀티 타임프레임 추세 확인 (TODO: 멀티TF) ────────────────────────
         mtf_trend = "neutral"
         mtf_confirmed = True
@@ -668,7 +698,7 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
             "symbol":           symbol,
             "score":            min(score, 100),
             "rsi":              round(rsi, 1),
-            "price":            float(close.iloc[-1]),
+            "price":            current_price,
             "signals":          signals,
             "strategy_type":    strategy_type,
             "strategy_label":   _STRATEGY_LABELS[strategy_type],

@@ -1931,6 +1931,52 @@ function AiLogEntry({ entry }: { entry: AiAnalysisLogEntry }) {
     )
   }
 
+  if (type === 'opportunistic_entry') {
+    return (
+      <div className="py-3 border-b border-surface-700 last:border-0 text-xs space-y-1">
+        <div className="flex items-start gap-2">
+          <Sparkles size={14} className="mt-0.5 flex-shrink-0 text-brand-400" />
+          <div className="flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-medium text-slate-200">기회 진입</span>
+              <span className="text-slate-300 font-mono">{entry.symbol}</span>
+              <span className="px-1.5 py-0.5 rounded bg-brand-500/20 text-brand-300 font-medium">
+                점수 {entry.score}
+              </span>
+              {entry.style && (
+                <span className="px-1.5 py-0.5 rounded bg-surface-600 text-slate-300">{entry.style}</span>
+              )}
+            </div>
+            <p className="text-slate-400 mt-1">시장 국면 무관 개별 강세 종목</p>
+          </div>
+          <span className="text-slate-600 flex-shrink-0">{entry.at}</span>
+        </div>
+      </div>
+    )
+  }
+
+  if (type === 'scalping_parallel') {
+    return (
+      <div className="py-3 border-b border-surface-700 last:border-0 text-xs space-y-1">
+        <div className="flex items-start gap-2">
+          <TrendingUp size={14} className="mt-0.5 flex-shrink-0 text-amber-400" />
+          <div className="flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-medium text-slate-200">초단타 병렬 진입</span>
+              <span className="text-slate-300 font-mono">{entry.symbol}</span>
+              <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-medium">
+                점수 {entry.score}
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-surface-600 text-slate-300">5m</span>
+            </div>
+            <p className="text-slate-400 mt-1">5m 병렬 스캔 · scalping 스타일</p>
+          </div>
+          <span className="text-slate-600 flex-shrink-0">{entry.at}</span>
+        </div>
+      </div>
+    )
+  }
+
   return null
 }
 
