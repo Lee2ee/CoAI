@@ -416,6 +416,41 @@ function SettingsModal({
               <p className={clsx('font-medium', currentMeta.color)}>{currentMeta.desc}</p>
               <p className="text-slate-500 mt-0.5">거래량 기준: {(form.exchange_id ?? 'upbit') === 'upbit' ? currentMeta.volDesc : currentMeta.volDescUsdt}</p>
             </div>
+            {/* 자동 전환 허용 스타일 */}
+            <div className="mt-3">
+              <p className="text-xs text-slate-500 mb-1.5 flex items-center gap-1">
+                자동 전환 허용
+                <Tooltip text="AI 시장 국면 감지가 매매 스타일을 자동 변경할 때 허용할 스타일만 선택하세요. 체크 해제된 스타일로는 자동 전환되지 않습니다." iconOnly />
+              </p>
+              <div className="flex gap-2 flex-wrap">
+                {STYLE_ORDER.map(key => {
+                  const meta = STYLE_META[key]
+                  const allowed: string[] = form.allowed_styles ?? ['scalping', 'short', 'mid', 'long']
+                  const checked = allowed.includes(key)
+                  const toggle = () => {
+                    const next = checked
+                      ? allowed.filter(s => s !== key)
+                      : [...allowed, key]
+                    // 최소 1개는 허용
+                    if (next.length === 0) return
+                    setForm(f => ({ ...f, allowed_styles: next }))
+                  }
+                  return (
+                    <label key={key} className="flex items-center gap-1 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={toggle}
+                        className="accent-brand-500"
+                      />
+                      <span className={clsx('text-xs', checked ? meta.color : 'text-slate-500')}>
+                        {STYLE_LABEL[key]}
+                      </span>
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
           </div>
 
           {/* 투자 성향 */}
@@ -814,6 +849,14 @@ function PositionCard({ pos, onClick, exchangeId }: { pos: AutoBotPosition; onCl
               {pos.position_style_label}
             </span>
           )}
+          {pos.risk_profile && (() => {
+            const rm = RISK_PROFILE_META[pos.risk_profile]
+            return rm ? (
+              <span className={clsx('text-xs px-1.5 py-0.5 rounded font-medium border', rm.badge, rm.border)}>
+                {rm.label}
+              </span>
+            ) : null
+          })()}
           {pos.avg_down_count > 0 && (
             <span className="text-xs bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded flex items-center gap-0.5">
               <TrendingDown size={10} /> 물타기 {pos.avg_down_count}회
@@ -1087,6 +1130,23 @@ function LogRow({ t, exchangeId }: { t: AutoBotTradeLog | AutoBotTradeDB; exchan
             {t.strategy_label}
           </span>
         )}
+        {t.position_style_label && (
+          <span className={clsx(
+            'px-1.5 py-0.5 rounded font-medium border',
+            STYLE_META[t.position_style ?? '']?.badge ?? 'bg-surface-600 text-slate-400',
+            STYLE_META[t.position_style ?? '']?.border ?? 'border-surface-500',
+          )}>
+            {t.position_style_label}
+          </span>
+        )}
+        {t.risk_profile && (() => {
+          const rm = RISK_PROFILE_META[t.risk_profile]
+          return rm ? (
+            <span className={clsx('px-1.5 py-0.5 rounded font-medium border', rm.badge, rm.border)}>
+              {rm.label}
+            </span>
+          ) : null
+        })()}
         <span className={clsx('px-1.5 py-0.5 rounded font-medium', reasonColor)}>
           {reasonLabel}
         </span>
@@ -1670,6 +1730,7 @@ export default function AutoTradePanel() {
               expectancy_pct: 0, max_drawdown_pct: 0, avg_win_pct: 0, avg_loss_pct: 0,
               win_rate: 0, best_trade_pct: 0, worst_trade_pct: 0, total_trades: 0,
             }}
+            trades={dbTrades && dbTrades.length > 0 ? dbTrades : status.trade_log}
             dailyPnlKrw={status.daily_pnl_krw ?? 0}
             maxDailyLossPct={status.settings.max_daily_loss_pct ?? 5}
             totalValueKrw={status.total_value_krw}
@@ -1947,8 +2008,31 @@ function PerfRow({ label, value, color, sub }: { label: string; value: string; c
   )
 }
 
-function PerformancePanel({ perf, dailyPnlKrw, maxDailyLossPct, totalValueKrw, exchangeId }: {
+type TradeLike = { pnl_pct: number; position_style?: string; position_style_label?: string; risk_profile?: string }
+
+function calcBreakdown(trades: TradeLike[], groupBy: 'position_style' | 'risk_profile') {
+  const map: Record<string, { wins: number; total: number; pnl: number; label: string }> = {}
+  for (const t of trades) {
+    const key = t[groupBy] ?? 'unknown'
+    const label = groupBy === 'position_style'
+      ? (t.position_style_label ?? key)
+      : (RISK_PROFILE_META[key]?.label ?? key)
+    if (!map[key]) map[key] = { wins: 0, total: 0, pnl: 0, label }
+    map[key].total++
+    map[key].pnl = +(map[key].pnl + t.pnl_pct).toFixed(2)
+    if (t.pnl_pct > 0) map[key].wins++
+  }
+  return Object.entries(map).map(([key, v]) => ({
+    key, label: v.label,
+    total: v.total,
+    winRate: v.total > 0 ? Math.round(v.wins / v.total * 100) : 0,
+    avgPnl: v.total > 0 ? +(v.pnl / v.total).toFixed(2) : 0,
+  }))
+}
+
+function PerformancePanel({ perf, trades = [], dailyPnlKrw, maxDailyLossPct, totalValueKrw, exchangeId }: {
   perf: PerformanceStats
+  trades?: TradeLike[]
   dailyPnlKrw: number
   maxDailyLossPct: number
   totalValueKrw: number
@@ -2008,6 +2092,48 @@ function PerformancePanel({ perf, dailyPnlKrw, maxDailyLossPct, totalValueKrw, e
         <PerfRow label="최고 수익" value={`+${perf.best_trade_pct.toFixed(2)}%`} color="up" />
         <PerfRow label="최대 손실" value={`${perf.worst_trade_pct.toFixed(2)}%`} color="down" />
       </div>
+
+      {/* 매매 스타일 / 투자 성향별 성과 */}
+      {trades.length > 0 && (() => {
+        const styleRows = calcBreakdown(trades, 'position_style')
+        const riskRows  = calcBreakdown(trades, 'risk_profile')
+        const headers = (
+          <div className="grid grid-cols-4 gap-1 text-slate-500 text-xs px-1 mb-1">
+            <span>구분</span><span className="text-right">거래</span>
+            <span className="text-right">승률</span><span className="text-right">평균손익</span>
+          </div>
+        )
+        const row = (key: string, label: string, total: number, winRate: number, avgPnl: number, badge: string) => (
+          <div key={key} className="grid grid-cols-4 gap-1 items-center py-1.5 border-b border-surface-700 last:border-0 text-xs px-1">
+            <span className={clsx('px-1.5 py-0.5 rounded font-medium w-fit', badge)}>{label}</span>
+            <span className="text-right text-slate-300 tabular-nums">{total}</span>
+            <span className={clsx('text-right tabular-nums font-semibold', winRate >= 50 ? 'text-up' : 'text-down')}>{winRate}%</span>
+            <span className={clsx('text-right tabular-nums font-semibold', avgPnl >= 0 ? 'text-up' : 'text-down')}>
+              {avgPnl >= 0 ? '+' : ''}{avgPnl.toFixed(2)}%
+            </span>
+          </div>
+        )
+        return (
+          <>
+            <div>
+              <p className="text-xs text-slate-500 mb-1 font-medium">매매 스타일별 성과</p>
+              <div className="bg-surface-700/50 rounded-lg p-2">
+                {headers}
+                {styleRows.map(r => row(r.key, r.label, r.total, r.winRate, r.avgPnl,
+                  STYLE_META[r.key]?.badge ?? 'bg-surface-600 text-slate-400'))}
+              </div>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 mb-1 font-medium">투자 성향별 성과</p>
+              <div className="bg-surface-700/50 rounded-lg p-2">
+                {headers}
+                {riskRows.map(r => row(r.key, r.label, r.total, r.winRate, r.avgPnl,
+                  RISK_PROFILE_META[r.key]?.badge ?? 'bg-surface-600 text-slate-400'))}
+              </div>
+            </div>
+          </>
+        )
+      })()}
     </div>
   )
 }
