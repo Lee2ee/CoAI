@@ -44,12 +44,15 @@ def _migrate(conn):
 
     # auto_bot_trades 신규 컬럼 (선물 지원 추가 시 기존 DB에 없음)
     _add_columns_if_missing(conn, inspector, "auto_bot_trades", [
-        ("market_type",       "VARCHAR(8)  NOT NULL DEFAULT 'spot'"),
-        ("side",              "VARCHAR(8)  NOT NULL DEFAULT 'long'"),
-        ("leverage",          "INTEGER     NOT NULL DEFAULT 1"),
-        ("margin_mode",       "VARCHAR(16) NOT NULL DEFAULT 'cross'"),
-        ("liquidation_price", "FLOAT"),
-        ("funding_paid",      "FLOAT       NOT NULL DEFAULT 0.0"),
+        ("market_type",          "VARCHAR(8)  NOT NULL DEFAULT 'spot'"),
+        ("side",                 "VARCHAR(8)  NOT NULL DEFAULT 'long'"),
+        ("leverage",             "INTEGER     NOT NULL DEFAULT 1"),
+        ("margin_mode",          "VARCHAR(16) NOT NULL DEFAULT 'cross'"),
+        ("liquidation_price",    "FLOAT"),
+        ("funding_paid",         "FLOAT       NOT NULL DEFAULT 0.0"),
+        ("position_style",       "VARCHAR(20) NOT NULL DEFAULT 'short'"),
+        ("position_style_label", "VARCHAR(20) NOT NULL DEFAULT '단타'"),
+        ("risk_profile",         "VARCHAR(20) NOT NULL DEFAULT 'balanced'"),
     ])
 
 
