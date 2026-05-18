@@ -219,6 +219,10 @@ function SettingsModal({
       max_add: preset.max_add,
     }
     const adjusted = applyRiskAdj(base, form.risk_profile ?? 'balanced')
+    // 사용자가 켜놓은 물타기/추매/피라미딩은 스타일 전환 시에도 유지
+    if (form.auto_avg_down) adjusted.auto_avg_down = true
+    if (form.auto_add) adjusted.auto_add = true
+    if (form.pyramid_enabled) adjusted.pyramid_enabled = true
     setForm(f => ({ ...f, ...adjusted }))
   }
 
@@ -235,6 +239,10 @@ function SettingsModal({
       auto_add: preset.auto_add,
     }
     const adjusted = applyRiskAdj(base, profile)
+    // 사용자가 켜놓은 물타기/추매/피라미딩은 투자 성향 변경 시에도 유지
+    if (form.auto_avg_down) adjusted.auto_avg_down = true
+    if (form.auto_add) adjusted.auto_add = true
+    if (form.pyramid_enabled) adjusted.pyramid_enabled = true
     setForm(f => ({ ...f, risk_profile: profile, ...adjusted }))
   }
 
@@ -1995,11 +2003,16 @@ function AiLogEntry({ entry }: { entry: AiAnalysisLogEntry }) {
 
 // ─── 성과 분석 패널 ─────────────────────────────────────────────────────────
 
-function PerfRow({ label, value, color, sub }: { label: string; value: string; color?: 'up' | 'down' | 'neutral'; sub?: string }) {
+function PerfRow({ label, value, color, sub, tooltip }: { label: string; value: string; color?: 'up' | 'down' | 'neutral'; sub?: string; tooltip?: string }) {
   const vc = color === 'up' ? 'text-up' : color === 'down' ? 'text-down' : 'text-slate-200'
   return (
     <div className="flex items-center justify-between py-2 border-b border-surface-700 last:border-0 text-xs">
-      <span className="text-slate-400">{label}</span>
+      <span className="text-slate-400 flex items-center gap-1">
+        {label}
+        {tooltip && (
+          <Tooltip text={tooltip} iconOnly />
+        )}
+      </span>
       <div className="text-right">
         <span className={`font-semibold tabular-nums ${vc}`}>{value}</span>
         {sub && <span className="text-slate-500 ml-1.5">{sub}</span>}
@@ -2069,28 +2082,38 @@ function PerformancePanel({ perf, trades = [], dailyPnlKrw, maxDailyLossPct, tot
         <p className="text-xs text-slate-500 mb-1 font-medium">리스크 조정 수익</p>
         <PerfRow label="샤프 비율" value={perf.sharpe_ratio.toFixed(2)}
           color={perf.sharpe_ratio >= 1 ? 'up' : perf.sharpe_ratio >= 0 ? 'neutral' : 'down'}
-          sub="(≥1 양호)" />
+          sub="(≥1 양호)"
+          tooltip="수익률을 변동성(위험)으로 나눈 값입니다. 1 이상이면 감수한 리스크 대비 수익이 충분하다는 의미이고, 클수록 좋습니다." />
         <PerfRow label="소르티노 비율" value={perf.sortino_ratio.toFixed(2)}
           color={perf.sortino_ratio >= 1 ? 'up' : perf.sortino_ratio >= 0 ? 'neutral' : 'down'}
-          sub="(하방 리스크)" />
+          sub="(하방 리스크)"
+          tooltip="샤프 비율과 비슷하지만, 손실이 날 때의 변동성만 위험으로 계산합니다. 수익이 오르내리는 건 위험으로 보지 않으므로 하락 리스크를 더 정확히 반영합니다." />
         <PerfRow label="칼마 비율" value={perf.calmar_ratio.toFixed(2)}
           color={perf.calmar_ratio >= 1 ? 'up' : perf.calmar_ratio >= 0 ? 'neutral' : 'down'}
-          sub="(수익/MDD)" />
+          sub="(수익/MDD)"
+          tooltip="총 수익률을 최대 낙폭(MDD)으로 나눈 값입니다. 최악의 손실 구간 대비 얼마나 벌었는지를 나타내며, 1 이상이면 손실폭보다 수익이 더 크다는 뜻입니다." />
         <PerfRow label="프로핏 팩터" value={perf.profit_factor.toFixed(2)}
           color={perf.profit_factor >= 1.5 ? 'up' : perf.profit_factor >= 1 ? 'neutral' : 'down'}
-          sub="(≥1.5 양호)" />
+          sub="(≥1.5 양호)"
+          tooltip="전체 수익의 합 ÷ 전체 손실의 합입니다. 1.5이면 손실 1원당 수익이 1.5원이라는 의미로, 1보다 크면 수익이 손실보다 많습니다." />
       </div>
 
       {/* 거래 통계 */}
       <div>
         <p className="text-xs text-slate-500 mb-1 font-medium">거래 통계</p>
         <PerfRow label="기대값 (Expectancy)" value={`${perf.expectancy_pct >= 0 ? '+' : ''}${perf.expectancy_pct.toFixed(2)}%`}
-          color={perf.expectancy_pct >= 0 ? 'up' : 'down'} />
-        <PerfRow label="최대 낙폭 (MDD)" value={`-${perf.max_drawdown_pct.toFixed(2)}%`} color="down" />
-        <PerfRow label="평균 수익 거래" value={`+${perf.avg_win_pct.toFixed(2)}%`} color="up" />
-        <PerfRow label="평균 손실 거래" value={`${perf.avg_loss_pct.toFixed(2)}%`} color="down" />
-        <PerfRow label="최고 수익" value={`+${perf.best_trade_pct.toFixed(2)}%`} color="up" />
-        <PerfRow label="최대 손실" value={`${perf.worst_trade_pct.toFixed(2)}%`} color="down" />
+          color={perf.expectancy_pct >= 0 ? 'up' : 'down'}
+          tooltip="거래 1건당 기대되는 평균 수익률입니다. 승률과 평균 손익을 함께 반영하며, 양수면 장기적으로 수익이 쌓인다는 뜻입니다." />
+        <PerfRow label="최대 낙폭 (MDD)" value={`-${perf.max_drawdown_pct.toFixed(2)}%`} color="down"
+          tooltip="고점에서 저점까지 가장 크게 떨어진 낙폭입니다. 전략이 최악의 구간에서 얼마나 손실을 봤는지를 나타내며, 작을수록 안전합니다." />
+        <PerfRow label="평균 수익 거래" value={`+${perf.avg_win_pct.toFixed(2)}%`} color="up"
+          tooltip="수익이 난 거래들의 평균 수익률입니다." />
+        <PerfRow label="평균 손실 거래" value={`${perf.avg_loss_pct.toFixed(2)}%`} color="down"
+          tooltip="손실이 난 거래들의 평균 손실률입니다." />
+        <PerfRow label="최고 수익" value={`+${perf.best_trade_pct.toFixed(2)}%`} color="up"
+          tooltip="지금까지 가장 수익이 많이 난 단일 거래의 수익률입니다." />
+        <PerfRow label="최대 손실" value={`${perf.worst_trade_pct.toFixed(2)}%`} color="down"
+          tooltip="지금까지 가장 손실이 많이 난 단일 거래의 손실률입니다." />
       </div>
 
       {/* 매매 스타일 / 투자 성향별 성과 */}

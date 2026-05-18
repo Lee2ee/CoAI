@@ -257,7 +257,7 @@ class AutoTradeBot:
             "ai_exit_assist": True,        # 이익 구간 청산 타이밍 보조
             # 포트폴리오 리스크
             "max_daily_loss_pct": 5.0,          # 일일 총자산 대비 최대 손실 (%)
-            "max_portfolio_exposure_pct": 80.0,  # 최대 투자 비중 (%)
+            "max_portfolio_exposure_pct": 90.0,  # 최대 투자 비중 (%)
             "correlation_threshold": 0.85,       # 종목 간 상관계수 진입 차단 임계값
             "mdd_limit_pct": 20.0,              # MDD 이 값(%) 초과 시 봇 자동 중지
             # ── 부분 청산 (TODO 22) ────────────────────────────────────────────
