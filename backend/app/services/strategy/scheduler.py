@@ -59,16 +59,21 @@ class StrategyScheduler:
             self._brokers[strategy.id] = broker
 
         timeframe = strategy.config.get("timeframe", "1h")
-        interval = max(TIMEFRAME_SECONDS.get(timeframe, 3600), 60)
+        tf_seconds = TIMEFRAME_SECONDS.get(timeframe, 3600)
+        # 체크 주기: 타임프레임의 1/4 (최소 60초, 최대 900초)
+        # 예) 1h → 900초(15분), 4h → 900초(15분), 15m → 225초(4분)
+        interval = max(60, min(tf_seconds // 4, 900))
 
+        from datetime import datetime as _dt
         self._scheduler.add_job(
             self._run_tick,
             IntervalTrigger(seconds=interval),
             args=[strategy.id],
             id=f"strategy_{strategy.id}",
             replace_existing=True,
+            next_run_time=_dt.now(),   # 활성화 즉시 첫 실행
         )
-        logger.info(f"Strategy {strategy.id} activated, interval={interval}s")
+        logger.info(f"Strategy {strategy.id} activated, interval={interval}s (tf={timeframe})")
 
     async def deactivate_strategy(self, strategy_id: int):
         if strategy_id in self._engines:

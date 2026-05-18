@@ -15,8 +15,9 @@ interface Props {
 }
 
 export default function EquityChart({ data, title = '자산 곡선' }: Props) {
-  const min = Math.min(...data.map((d) => d.value)) * 0.99
-  const max = Math.max(...data.map((d) => d.value)) * 1.01
+  const values = data.map((d) => d.value)
+  const min = values.length > 0 ? Math.min(...values) * 0.99 : 0
+  const max = values.length > 0 ? Math.max(...values) * 1.01 : 100
 
   return (
     <div className="card">
