@@ -11,9 +11,9 @@ interface TickerData {
   change_pct: number
 }
 
-function getWsUrl(symbol: string) {
+function getWsUrl(symbols: string[]) {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${proto}//${window.location.host}/ws/ticker?symbol=${encodeURIComponent(symbol)}&exchange=upbit`
+  return `${proto}//${window.location.host}/ws/tickers?symbols=${encodeURIComponent(symbols.join(','))}&exchange=upbit`
 }
 
 export default function TickerBar() {
@@ -37,7 +37,7 @@ export default function TickerBar() {
   }, [])
 
   const { connected } = useWebSocket(
-    getWsUrl('BTC/KRW'),
+    getWsUrl(WATCH_SYMBOLS),
     { onMessage, reconnectInterval: 5000 },
   )
 

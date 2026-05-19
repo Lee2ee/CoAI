@@ -82,6 +82,44 @@ async def ws_ticker(
         await connector.close()
 
 
+@router.websocket("/ws/tickers")
+async def ws_tickers(
+    websocket: WebSocket,
+    symbols: str = Query("BTC/KRW"),
+    exchange: str = Query("upbit"),
+):
+    """여러 심볼을 한 커넥션으로 폴링. symbols=BTC/KRW,ETH/KRW,... 형식."""
+    await websocket.accept()
+    symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    connector = ExchangeConnector(exchange_id=exchange, is_paper=True)
+
+    try:
+        while True:
+            tasks = [
+                asyncio.wait_for(connector.fetch_ticker(sym), timeout=10)
+                for sym in symbol_list
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for sym, result in zip(symbol_list, results):
+                if isinstance(result, Exception):
+                    continue
+                await websocket.send_json({
+                    "type": "ticker",
+                    "symbol": sym,
+                    "last": result["last"],
+                    "bid": result.get("bid", 0),
+                    "ask": result.get("ask", 0),
+                    "change_pct": result.get("percentage") or 0,
+                    "volume": result.get("quoteVolume") or 0,
+                })
+            await asyncio.sleep(TICK_INTERVAL)
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await connector.close()
+
+
 @router.websocket("/ws/strategies")
 async def ws_strategies(websocket: WebSocket):
     await websocket.accept()
