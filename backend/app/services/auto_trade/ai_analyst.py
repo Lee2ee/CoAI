@@ -124,7 +124,7 @@ async def _call(prompt: str, max_tokens: int = 120, timeout: float = 25.0) -> st
     try:
         if provider == "ollama":
             return await asyncio.wait_for(_ollama(prompt, cfg, max_tokens), timeout=timeout)
-        elif provider in ("groq", "openai"):
+        elif provider in ("groq", "openai", "grok"):
             return await asyncio.wait_for(_openai_compat(prompt, cfg, max_tokens), timeout=timeout)
         elif provider == "anthropic":
             return await asyncio.wait_for(_anthropic(prompt, cfg, max_tokens), timeout=timeout)
@@ -149,18 +149,23 @@ async def _ollama(prompt: str, cfg: dict, max_tokens: int) -> str:
 
 
 async def _openai_compat(prompt: str, cfg: dict, max_tokens: int) -> str:
-    """Groq / OpenAI 호환 엔드포인트"""
+    """Groq / OpenAI / Grok(xAI) 호환 엔드포인트"""
     provider = cfg.get("provider", "groq")
     api_key = cfg.get("api_key", "")
     if not api_key:
         raise ValueError("API 키 없음")
-    url = (
-        "https://api.groq.com/openai/v1/chat/completions"
-        if provider == "groq"
-        else "https://api.openai.com/v1/chat/completions"
-    )
+    url = {
+        "groq":   "https://api.groq.com/openai/v1/chat/completions",
+        "openai": "https://api.openai.com/v1/chat/completions",
+        "grok":   "https://api.x.ai/v1/chat/completions",
+    }.get(provider, "https://api.openai.com/v1/chat/completions")
+    default_model = {
+        "groq":   "llama-3.3-70b-versatile",
+        "openai": "gpt-4o-mini",
+        "grok":   "grok-3-mini",
+    }.get(provider, "gpt-4o-mini")
     payload = {
-        "model": cfg.get("model", "llama-3.3-70b-versatile"),
+        "model": cfg.get("model") or default_model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
         "max_tokens": max_tokens,
@@ -168,7 +173,7 @@ async def _openai_compat(prompt: str, cfg: dict, max_tokens: int) -> str:
     async with httpx.AsyncClient(timeout=20) as client:
         res = await client.post(url, json=payload, headers={"Authorization": f"Bearer {api_key}"})
         if res.status_code == 429:
-            raise ValueError("Groq 요청 한도 초과")
+            raise ValueError(f"{provider.capitalize()} 요청 한도 초과")
         res.raise_for_status()
     return res.json()["choices"][0]["message"]["content"]
 
@@ -203,6 +208,7 @@ async def check_entry(
     strategy_type: str,
     signals: list[str],
     rsi: float,
+    side: str = "long",
 ) -> dict:
     """
     진입 여부 AI 검증.
@@ -216,17 +222,23 @@ async def check_entry(
         }
     실패 시 폴백: enter=True, confidence=70 (봇 정상 진행)
     """
-    cache_key = f"entry:{symbol}:{score}:{strategy_type}"
+    cache_key = f"entry:{symbol}:{score}:{strategy_type}:{side}"
     cached = _get_cache(cache_key, CACHE_TTL["entry"])
     if cached:
         logger.debug(f"AI 진입 캐시 사용: {symbol}")
         return cached
 
     signals_str = ", ".join(signals[:3]) if signals else "none"
+    direction_hint = (
+        "This is a SHORT (sell) entry — bearish signals are FAVORABLE."
+        if side == "short"
+        else "This is a LONG (buy) entry — bullish signals are FAVORABLE."
+    )
     prompt = (
-        f"Crypto entry decision. Reply ONLY with JSON. reason must be in Korean.\n"
-        f"Symbol:{symbol} Score:{score}/100 Strategy:{strategy_type} "
+        f"Crypto futures entry decision. Reply ONLY with JSON. reason must be in Korean.\n"
+        f"Symbol:{symbol} Direction:{side.upper()} Score:{score}/100 Strategy:{strategy_type} "
         f"RSI:{rsi:.0f} Signals:{signals_str}\n"
+        f"{direction_hint}\n"
         f'Should we enter now? {{"enter":true/false,"confidence":50-95,"reason":"한국어 1문장"}}'
     )
 

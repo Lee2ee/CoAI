@@ -207,6 +207,11 @@ export interface AutoBotTradeLog {
   position_style?: string
   position_style_label?: string
   risk_profile?: string
+  strategy_type?: string
+  strategy_label?: string
+  market_type?: 'spot' | 'futures'
+  side?: 'long' | 'short'
+  leverage?: number
 }
 
 export interface ScanResult {
@@ -221,6 +226,7 @@ export interface ScanResult {
   tp_pct: number | null
   mtf_trend?: 'bullish' | 'bearish' | 'neutral'
   mtf_confirmed?: boolean
+  side?: 'long' | 'short'
 }
 
 export interface AutoBotSettings {
@@ -247,6 +253,7 @@ export interface AutoBotSettings {
   ai_exit_assist: boolean
   max_daily_loss_pct: number
   max_portfolio_exposure_pct: number
+  downtrend_avg_down_mode?: boolean
   // 피라미딩
   pyramid_enabled?: boolean
   pyramid_threshold_pct?: number
@@ -278,6 +285,8 @@ export interface FuturesPosition {
   signals: string[]
   strategy_type: string
   strategy_label: string
+  position_style?: string
+  position_style_label?: string
   entry_at: string
 }
 
@@ -305,6 +314,7 @@ export interface AiAnalysisLogEntry {
   fee_pct?: number
   ev_per_trade?: number
   position_style?: string
+  side?: 'long' | 'short'
   leverage?: number
   forecast?: { '1d': number; '1w': number; '1m': number; '1y': number }
 }
@@ -387,6 +397,9 @@ export interface AutoBotTradeDB {
   entry_at: string
   exit_at: string
   is_paper: boolean
+  market_type?: 'spot' | 'futures'
+  side?: 'long' | 'short'
+  leverage?: number
 }
 
 export interface AutoBotTradeStats {

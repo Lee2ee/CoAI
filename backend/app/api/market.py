@@ -152,3 +152,30 @@ async def get_supported_exchanges():
             # 확장 시 여기에 추가
         ]
     }
+
+
+# USDT→KRW 환율 캐시 (1분 TTL)
+_rate_cache: dict = {"rate": None, "ts": 0.0}
+
+@router.get("/usdt-krw-rate")
+async def get_usdt_krw_rate():
+    """업비트 KRW-USDT 현재가로 USDT→KRW 환율 반환. 1분 캐시."""
+    import time
+    now = time.time()
+    if _rate_cache["rate"] and now - _rate_cache["ts"] < 60:
+        return {"rate": _rate_cache["rate"]}
+    try:
+        connector = ExchangeConnector(exchange_id="upbit", is_paper=True)
+        ticker = await asyncio.wait_for(
+            connector._exchange.fetch_ticker("USDT/KRW"),
+            timeout=REQUEST_TIMEOUT,
+        )
+        rate = ticker["last"]
+        _rate_cache["rate"] = rate
+        _rate_cache["ts"] = now
+        return {"rate": rate}
+    except Exception as e:
+        if _rate_cache["rate"]:
+            return {"rate": _rate_cache["rate"]}
+        logger.warning(f"USDT/KRW 환율 조회 실패: {e}")
+        raise HTTPException(status_code=503, detail="USDT/KRW 환율 조회 실패")

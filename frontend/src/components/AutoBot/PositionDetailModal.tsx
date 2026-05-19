@@ -7,7 +7,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { X, TrendingDown, TrendingUp, AlertTriangle } from 'lucide-react'
 import api from '../../utils/api'
-import type { AutoBotPosition, OHLCVBar } from '../../types'
+import type { AutoBotPosition, FuturesPosition, OHLCVBar } from '../../types'
 import clsx from 'clsx'
 import Tooltip from '../common/Tooltip'
 import ConfirmModal from '../common/ConfirmModal'
@@ -633,6 +633,195 @@ function InfoBox({
         {tooltip && <Tooltip text={tooltip} iconOnly />}
       </p>
       <p className={clsx('font-semibold font-mono text-xs', colorClass)}>{value}</p>
+    </div>
+  )
+}
+
+// ─── 선물 포지션 상세 모달 ────────────────────────────────────────────────────
+
+export function FuturesPositionDetailModal({ pos, onClose, krwRate }: { pos: FuturesPosition; onClose: () => void; krwRate: number | null }) {
+  const qc = useQueryClient()
+  const [showConfirm, setShowConfirm] = useState(false)
+
+  const closeMut = useMutation({
+    mutationFn: () => api.post(`/auto-bot/position/${encodeURIComponent(pos.symbol)}/close`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['auto-bot-status'] })
+      onClose()
+    },
+  })
+
+  const isLong = pos.side === 'long'
+  const pnlPos = pos.unrealized_pnl_pct >= 0
+  const liqPct = pos.liquidation_price
+    ? Math.abs(pos.current_price - pos.liquidation_price) / pos.current_price * 100
+    : null
+  const liqDanger = liqPct !== null && liqPct < 10
+  const holdMin = Math.round((Date.now() - new Date(pos.entry_at).getTime()) / 60000)
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      <div className="relative bg-surface-800 rounded-xl shadow-2xl border border-surface-600 w-full max-w-md max-h-[90vh] overflow-y-auto">
+        {/* 헤더 */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-surface-700">
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-slate-100 text-base">{pos.symbol}</span>
+            <span className={clsx(
+              'text-xs px-1.5 py-0.5 rounded font-bold border',
+              isLong ? 'bg-up/20 border-up/40 text-up' : 'bg-down/20 border-down/40 text-down'
+            )}>
+              {isLong ? '롱' : '숏'} {pos.leverage}x
+            </span>
+            <span className="text-xs bg-surface-600 text-slate-400 px-1.5 py-0.5 rounded">
+              {pos.margin_mode === 'cross' ? 'Cross' : 'Isolated'}
+            </span>
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-300 p-1">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-4">
+          {/* PnL 배너 */}
+          <div className={clsx(
+            'rounded-lg px-4 py-3 flex items-center justify-between',
+            pnlPos ? 'bg-up/10 border border-up/20' : 'bg-down/10 border border-down/20'
+          )}>
+            <div>
+              <p className="text-xs text-slate-400">미실현 손익</p>
+              <p className={clsx('text-xl font-bold font-mono tabular-nums', pnlPos ? 'text-up' : 'text-down')}>
+                {pnlPos ? '+' : ''}{pos.unrealized_pnl_usdt.toFixed(4)} USDT
+              </p>
+              {krwRate !== null && (
+                <p className={clsx('text-xs font-mono', pnlPos ? 'text-up/60' : 'text-down/60')}>
+                  ≈ ₩{Math.round(pos.unrealized_pnl_usdt * krwRate).toLocaleString('ko-KR')}
+                </p>
+              )}
+            </div>
+            <div className="text-right">
+              <p className="text-xs text-slate-400">수익률</p>
+              <p className={clsx('text-xl font-bold tabular-nums', pnlPos ? 'text-up' : 'text-down')}>
+                {pnlPos ? '+' : ''}{pos.unrealized_pnl_pct.toFixed(2)}%
+              </p>
+            </div>
+          </div>
+
+          {/* 가격 정보 */}
+          <div className="grid grid-cols-3 gap-2 text-xs">
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">진입가</p>
+              <p className="text-amber-400 font-mono font-semibold">${pos.entry_price.toFixed(4)}</p>
+            </div>
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">현재가</p>
+              <p className="text-slate-100 font-mono font-semibold">${pos.current_price.toFixed(4)}</p>
+            </div>
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">수량</p>
+              <p className="text-slate-100 font-mono font-semibold">{pos.contracts.toFixed(4)}</p>
+            </div>
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">손절가</p>
+              <p className="text-down font-mono font-semibold">${pos.stop_loss_price.toFixed(4)}</p>
+            </div>
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">익절가</p>
+              <p className="text-up font-mono font-semibold">
+                {pos.take_profit_price === Infinity || pos.take_profit_price > 1e15
+                  ? '트레일링 중'
+                  : `$${pos.take_profit_price.toFixed(4)}`}
+              </p>
+            </div>
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">청산가</p>
+              <p className={clsx(
+                'font-mono font-semibold',
+                liqDanger ? 'text-red-400 animate-pulse' : 'text-slate-400'
+              )}>
+                {pos.liquidation_price ? `$${pos.liquidation_price.toFixed(4)}` : '—'}
+                {liqPct !== null && <span className="text-xs ml-1">({liqPct.toFixed(1)}%)</span>}
+              </p>
+            </div>
+          </div>
+
+          {/* 증거금 / 보유시간 */}
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">증거금</p>
+              <p className="text-slate-100 font-mono font-semibold">${pos.initial_margin.toFixed(2)}</p>
+              {krwRate !== null && (
+                <p className="text-slate-500 font-mono">≈ ₩{Math.round(pos.initial_margin * krwRate).toLocaleString('ko-KR')}</p>
+              )}
+            </div>
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">보유시간</p>
+              <p className="text-slate-100 font-mono font-semibold">{holdMin}분</p>
+            </div>
+          </div>
+
+          {/* 청산가 경고 */}
+          {liqDanger && (
+            <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-xs text-red-400">
+              <AlertTriangle size={14} />
+              청산가가 현재가와 매우 가깝습니다! 포지션 위험 상태
+            </div>
+          )}
+
+          {/* 펀딩비 */}
+          {pos.funding_rate !== 0 && (
+            <div className="flex items-center gap-2 text-xs bg-surface-700 rounded px-2.5 py-2">
+              <span className="text-slate-500">펀딩비</span>
+              <span className={pos.funding_rate > 0 ? 'text-amber-400' : 'text-up'}>
+                {(pos.funding_rate * 100).toFixed(4)}%
+              </span>
+              <span className="text-slate-500">({pos.funding_rate > 0 ? '롱 부담' : '숏 부담'})</span>
+            </div>
+          )}
+
+          {/* 전략 정보 */}
+          <div className="bg-surface-700 rounded-lg px-3 py-2.5 space-y-1.5">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-slate-400">전략</span>
+              <span className="text-brand-400 font-medium">{pos.strategy_label}</span>
+            </div>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-slate-400">진입 점수</span>
+              <span className={clsx(
+                'font-bold',
+                pos.score >= 70 ? 'text-up' : pos.score >= 50 ? 'text-amber-400' : 'text-slate-300'
+              )}>{pos.score}</span>
+            </div>
+            {pos.signals.length > 0 && (
+              <div className="flex flex-wrap gap-1 pt-0.5">
+                {pos.signals.map(s => (
+                  <span key={s} className="text-xs bg-surface-600 text-slate-400 px-1 py-0.5 rounded">{s}</span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* 수동 청산 버튼 */}
+          <button
+            onClick={() => setShowConfirm(true)}
+            disabled={closeMut.isPending}
+            className="w-full py-2.5 rounded-lg bg-red-500/20 border border-red-500/40 text-red-400 hover:bg-red-500/30 text-sm font-semibold transition-colors disabled:opacity-50"
+          >
+            {closeMut.isPending ? '청산 중...' : '수동 청산'}
+          </button>
+        </div>
+      </div>
+
+      {showConfirm && (
+        <ConfirmModal
+          message={`${pos.symbol} 포지션을 수동 청산하시겠습니까?`}
+          detail={`현재 손익: ${pnlPos ? '+' : ''}${pos.unrealized_pnl_pct.toFixed(2)}% (${pnlPos ? '+' : ''}${pos.unrealized_pnl_usdt.toFixed(4)} USDT)`}
+          confirmText="청산"
+          variant="danger"
+          onConfirm={() => { setShowConfirm(false); closeMut.mutate() }}
+          onClose={() => setShowConfirm(false)}
+        />
+      )}
     </div>
   )
 }

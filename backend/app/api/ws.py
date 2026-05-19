@@ -100,9 +100,11 @@ async def ws_tickers(
                 for sym in symbol_list
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            successful = 0
             for sym, result in zip(symbol_list, results):
                 if isinstance(result, Exception):
                     continue
+                successful += 1
                 await websocket.send_json({
                     "type": "ticker",
                     "symbol": sym,
@@ -112,6 +114,8 @@ async def ws_tickers(
                     "change_pct": result.get("percentage") or 0,
                     "volume": result.get("quoteVolume") or 0,
                 })
+            if successful == 0:
+                await websocket.send_json({"type": "error", "message": f"{exchange} 시세 조회 실패"})
             await asyncio.sleep(TICK_INTERVAL)
 
     except WebSocketDisconnect:

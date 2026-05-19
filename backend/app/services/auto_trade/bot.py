@@ -259,6 +259,7 @@ class AutoTradeBot:
             # 포트폴리오 리스크
             "max_daily_loss_pct": 5.0,          # 일일 총자산 대비 최대 손실 (%)
             "max_portfolio_exposure_pct": 90.0,  # 최대 투자 비중 (%)
+            "downtrend_avg_down_mode": False,    # 하락장 시 신규 진입 차단 + 물타기 집중
             "correlation_threshold": 0.85,       # 종목 간 상관계수 진입 차단 임계값
             "mdd_limit_pct": 20.0,              # MDD 이 값(%) 초과 시 봇 자동 중지
             # ── 부분 청산 (TODO 22) ────────────────────────────────────────────
@@ -314,7 +315,7 @@ class AutoTradeBot:
 
         if self._is_futures:
             # 선물 모드: BinanceFuturesConnector 초기화 (시세 조회용)
-            from ..core.config import get_settings
+            from ...core.config import get_settings
             cfg = get_settings()
             self._futures_connector = BinanceFuturesConnector(
                 api_key=cfg.BINANCE_API_KEY,
@@ -370,6 +371,7 @@ class AutoTradeBot:
         self._running = False
         self._paused = False
         self._started_at = None
+        self._last_regime_at = 0.0  # 재시작 시 즉시 국면 감지 실행
         # asyncio 가격 모니터 태스크 취소
         if self._price_task and not self._price_task.done():
             self._price_task.cancel()
@@ -603,14 +605,71 @@ class AutoTradeBot:
                 await asyncio.sleep(5)
 
     async def _check_single_futures_position(self, symbol: str, price: float):
-        """선물 단일 포지션 SL/TP + 청산가 체크 (REST 모니터용)."""
+        """선물 단일 포지션 SL/TP + 트레일링 + 손익분기 SL 체크 (REST 모니터용)."""
         pos = self._futures_positions.get(symbol)
         if pos is None:
             return
-        side = pos["side"]
-        sl   = pos["stop_loss_price"]
-        tp   = pos["take_profit_price"]
+        side  = pos["side"]
+        entry = pos["entry_price"]
 
+        # 고점/저점 갱신
+        if side == "long":
+            if price > pos.get("highest_price", entry):
+                pos["highest_price"] = price
+        else:
+            if price < pos.get("lowest_price", entry):
+                pos["lowest_price"] = price
+
+        # 현재 미실현 손익률 (레버리지 반영)
+        invested = pos.get("initial_margin", 1.0)
+        leverage = pos.get("leverage", 1)
+        raw_pnl = (price - entry) * pos.get("contracts", 0)
+        if side == "short":
+            raw_pnl = -raw_pnl
+        pnl_pct = raw_pnl / invested * 100 if invested > 0 else 0.0
+
+        tp_pct = abs(pos["take_profit_price"] - entry) / entry * 100
+
+        # ── 트레일링 스탑 ─────────────────────────────────────────────────────
+        if self.settings.get("trailing_stop"):
+            t_activate = self.settings.get("trailing_activate_pct", tp_pct * 0.8)
+            t_pct      = self.settings.get("trailing_pct", 2.0)
+            if not pos.get("trailing_active") and pnl_pct >= t_activate:
+                pos["trailing_active"] = True
+                pos["take_profit_price"] = float("inf") if side == "long" else 0.0
+                logger.info(f"AutoBot 선물 트레일링 활성화 {symbol} ({side}) pnl={pnl_pct:+.2f}%")
+            if pos.get("trailing_active"):
+                if side == "long":
+                    trail_sl = pos.get("highest_price", price) * (1 - t_pct / 100)
+                    if trail_sl > pos["stop_loss_price"]:
+                        pos["stop_loss_price"] = trail_sl
+                    if price <= pos["stop_loss_price"]:
+                        await self._close_futures_position(symbol, price, "trailing_stop")
+                        return
+                else:
+                    trail_sl = pos.get("lowest_price", price) * (1 + t_pct / 100)
+                    if trail_sl < pos["stop_loss_price"]:
+                        pos["stop_loss_price"] = trail_sl
+                    if price >= pos["stop_loss_price"]:
+                        await self._close_futures_position(symbol, price, "trailing_stop")
+                        return
+
+        # ── 손익분기 SL 이동: 이익이 TP의 40% 이상 → SL을 진입가로 ────────────
+        if (pnl_pct >= tp_pct * 0.4
+                and not pos.get("trailing_active")
+                and not pos.get("breakeven_set")):
+            if side == "long" and pos["stop_loss_price"] < entry:
+                pos["stop_loss_price"] = entry
+                pos["breakeven_set"] = True
+                logger.info(f"AutoBot 선물 손익분기 SL 이동 {symbol} ({side}): SL → {entry:.4f}")
+            elif side == "short" and pos["stop_loss_price"] > entry:
+                pos["stop_loss_price"] = entry
+                pos["breakeven_set"] = True
+                logger.info(f"AutoBot 선물 손익분기 SL 이동 {symbol} ({side}): SL → {entry:.4f}")
+
+        # ── SL/TP 체크 ────────────────────────────────────────────────────────
+        sl = pos["stop_loss_price"]
+        tp = pos["take_profit_price"]
         if side == "long":
             if price <= sl:
                 await self._close_futures_position(symbol, price, "stop_loss")
@@ -626,11 +685,16 @@ class AutoTradeBot:
                 await self._close_futures_position(symbol, price, "take_profit")
                 return
 
+        # ── 청산가 2% 이내 접근 → 강제 청산 (SL이 먼저 처리, 여기는 최후 보루) ─────
         liq = pos.get("liquidation_price")
         if liq and liq > 0:
             distance_pct = abs(price - liq) / price * 100
-            if distance_pct < 5.0:
-                logger.warning(f"[청산가 경고] {symbol} {distance_pct:.1f}% — 강제 청산")
+            # 롱: 현재가가 청산가 이하로 내려간 경우도 포함
+            already_liq = (side == "long" and price <= liq) or (side == "short" and price >= liq)
+            if already_liq or distance_pct < 2.0:
+                logger.warning(
+                    f"[청산가 경고] {symbol} 청산가 {liq:.4f}까지 {distance_pct:.1f}% — 강제 청산"
+                )
                 await self._close_futures_position(symbol, price, "liquidation_warning")
 
     async def _handle_price_update(self, symbol: str, price: float):
@@ -918,6 +982,11 @@ class AutoTradeBot:
         """선물 매매 사이클"""
         if not self._futures_connector:
             return
+
+        # AI: 국면 감지 → 스타일 자동 전환
+        await self._run_regime_detection()
+        # AI: 성과 피드백 → min_score 자동 보정
+        await self._run_performance_feedback()
 
         scan_results = await scan_futures_market(
             connector=self._futures_connector,
@@ -1430,12 +1499,16 @@ class AutoTradeBot:
                 scan = next((r for r in (scan_results or []) if r["symbol"] == symbol), None)
                 balance = self._broker.balance.get(self._quote_currency, 0)
 
+                _is_downtrend = self._current_regime.get("regime") == "downtrend"
+                _downtrend_avg_mode = self.settings.get("downtrend_avg_down_mode", False)
                 if (
                     self.settings["auto_avg_down"]
                     and pos["avg_down_count"] < self.settings["max_avg_down"]
                     and pnl_pct < 0
                     and balance >= 5_000
-                    and self._current_regime.get("regime") != "downtrend"  # 하락추세에서 물타기 금지
+                    # 하락장 물타기 모드 ON이면 downtrend에서도 물타기 허용
+                    # 모드 OFF이면 기존대로 downtrend에서 물타기 금지
+                    and (not _is_downtrend or _downtrend_avg_mode)
                     and self._should_avg_down(pos, current_price, scan)
                 ):
                     await self._add_to_position(symbol, "avg_down", current_price)
@@ -1487,6 +1560,14 @@ class AutoTradeBot:
             # 만료된 블랙리스트 항목 정리
             _now = _scan_t.time()
             self._reentry_blacklist = {s: t for s, t in self._reentry_blacklist.items() if t > _now}
+
+            # 하락장 물타기 모드: 신규 진입 전체 차단
+            if (
+                self.settings.get("downtrend_avg_down_mode", False)
+                and self._current_regime.get("regime") == "downtrend"
+            ):
+                logger.info("AutoBot: 하락장 물타기 모드 활성 — 신규 진입 차단, 물타기 집중")
+                return
 
             for candidate in ordered:
                 if len(self._positions) >= self.settings["max_positions"]:
@@ -1576,6 +1657,7 @@ class AutoTradeBot:
                         strategy_type=st,
                         signals=candidate.get("signals", []),
                         rsi=candidate.get("rsi", 50.0),
+                        side="long",
                     )
                     # 급등 종목은 AI 블록 confidence 기준을 50으로 완화
                     ai_block_threshold = 50 if is_surge else 65
@@ -1703,6 +1785,7 @@ class AutoTradeBot:
                         strategy_type=candidate.get("strategy_type", "standard"),
                         signals=candidate.get("signals", []),
                         rsi=candidate.get("rsi", 50.0),
+                        side="long",
                     )
                     if not ai_result["enter"] or ai_result["confidence"] < 55:
                         logger.info(
@@ -1900,6 +1983,7 @@ class AutoTradeBot:
                     "at":             datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
                     "type":           "entry_forecast",
                     "symbol":         symbol,
+                    "side":           "long",   # 현물은 항상 롱
                     "tp_pct":         round(tp_pct, 2),
                     "sl_pct":         round(sl_pct, 2),
                     "win_rate":       round(wr * 100, 1),
@@ -2233,7 +2317,20 @@ class AutoTradeBot:
             return {"ok": False, "message": str(e)}
 
     async def manual_close(self, symbol: str) -> dict:
-        """수동 청산"""
+        """수동 청산 (현물 & 선물 공통)"""
+        # 선물 포지션
+        if symbol in self._futures_positions:
+            if not self._futures_connector:
+                return {"ok": False, "message": "커넥터 없음"}
+            try:
+                price = await asyncio.wait_for(
+                    self._futures_connector.get_mark_price(symbol), timeout=10
+                )
+                await self._close_futures_position(symbol, price, "manual")
+                return {"ok": True}
+            except Exception as e:
+                return {"ok": False, "message": str(e)}
+        # 현물 포지션
         if symbol not in self._positions:
             return {"ok": False, "message": "포지션 없음"}
         if not self._connector:
@@ -2363,6 +2460,8 @@ class AutoTradeBot:
                 "position_style": pos.get("position_style", "short"),
                 "position_style_label": pos.get("position_style_label", "단타"),
                 "risk_profile": pos.get("risk_profile", "balanced"),
+                "strategy_type": pos.get("strategy_type", "standard"),
+                "strategy_label": pos.get("strategy_label", "표준"),
             }
             self._trade_log.insert(0, record)
             if len(self._trade_log) > MAX_TRADE_LOG:
@@ -2457,8 +2556,48 @@ class AutoTradeBot:
             logger.warning(f"AutoBot 선물: {symbol} 마크가격 조회 실패 ({e})")
             return
 
+        # AI 진입 확인
+        if ai_analyst.is_ai_available() and self.settings.get("ai_entry_validation", True):
+            ai_result = await ai_analyst.check_entry(
+                symbol=symbol,
+                score=scan_result["score"],
+                strategy_type=scan_result.get("strategy_type", "standard"),
+                signals=scan_result.get("signals", []),
+                rsi=scan_result.get("rsi", 50.0),
+                side=side,
+            )
+            if not ai_result["enter"] or ai_result["confidence"] < 55:
+                log_entry = {
+                    "at":         datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+                    "type":       "entry_blocked",
+                    "symbol":     symbol,
+                    "confidence": ai_result["confidence"],
+                    "reason":     ai_result["reason"],
+                }
+                self._analysis_log.insert(0, log_entry)
+                if len(self._analysis_log) > 20:
+                    self._analysis_log.pop()
+                logger.info(f"AutoBot 선물 AI 진입 거부 {symbol}: confidence={ai_result['confidence']}")
+                return
+
         usdt_balance = self._futures_broker.usdt_balance
         sl_pct = scan_result.get("sl_pct") or self.settings["stop_loss_pct"]
+
+        # 레버리지 안전 상한 계산:
+        #   제약 1 (SL): 청산가가 손절가 너머에 있어야 함 → 1/lev - MMR > sl_pct/100 + 0.5%
+        #   제약 2 (경고): 진입 즉시 liquidation_warning(2%) 발동 방지 → 1/lev - MMR > 2% + 0.5%
+        # 두 제약 중 더 엄격한 값(최솟값)을 취함
+        _MMR = 0.005
+        _cap_sl   = int(1.0 / (sl_pct / 100 + _MMR + 0.005))   # SL 기반 상한
+        _cap_warn = int(1.0 / (0.020      + _MMR + 0.005))     # 경고 임계 기반 상한 (≈33x)
+        max_safe_leverage = max(1, min(_cap_sl, _cap_warn))
+        if leverage > max_safe_leverage:
+            logger.info(
+                f"AutoBot 선물: 레버리지 자동 조정 {leverage}x → {max_safe_leverage}x "
+                f"(SL={sl_pct}% 기준 안전 상한 {_cap_sl}x, 청산경고 기준 상한 {_cap_warn}x)"
+            )
+            leverage = max_safe_leverage
+
         usdt_amount = calc_futures_position_size(
             usdt_balance=usdt_balance,
             leverage=leverage,
@@ -2486,26 +2625,34 @@ class AutoTradeBot:
         sl_price = price * (1 - sl_pct / 100) if side == "long" else price * (1 + sl_pct / 100)
         tp_price = price * (1 + tp_pct / 100) if side == "long" else price * (1 - tp_pct / 100)
 
+        _pos_style = scan_result.get("style", self.settings.get("trading_style", "short"))
+        _pos_style_label = TRADING_STYLE_PRESETS.get(_pos_style, {}).get("label", "단타")
         self._futures_positions[symbol] = {
-            "symbol":            symbol,
-            "side":              side,
-            "entry_price":       price,
-            "contracts":         fp["contracts"],
-            "leverage":          leverage,
-            "margin_mode":       self.settings["margin_mode"],
-            "initial_margin":    fp["initial_margin"],
-            "liquidation_price": fp["liquidation_price"],
-            "stop_loss_price":   sl_price,
-            "take_profit_price": tp_price,
-            "current_price":     price,
-            "unrealized_pnl_usdt": 0.0,
-            "unrealized_pnl_pct":  0.0,
-            "funding_rate":      scan_result.get("funding_rate", 0.0),
-            "score":             scan_result["score"],
-            "signals":           scan_result.get("signals", []),
-            "strategy_type":     scan_result.get("strategy_type", "standard"),
-            "strategy_label":    scan_result.get("strategy_label", "표준"),
-            "entry_at":          datetime.now(KST).isoformat(),
+            "symbol":               symbol,
+            "side":                 side,
+            "entry_price":          price,
+            "contracts":            fp["contracts"],
+            "leverage":             leverage,
+            "margin_mode":          self.settings["margin_mode"],
+            "initial_margin":       fp["initial_margin"],
+            "liquidation_price":    fp["liquidation_price"],
+            "stop_loss_price":      sl_price,
+            "take_profit_price":    tp_price,
+            "current_price":        price,
+            "unrealized_pnl_usdt":  0.0,
+            "unrealized_pnl_pct":   0.0,
+            "highest_price":        price,   # 트레일링 스탑용 고점 추적
+            "lowest_price":         price,   # 트레일링 스탑용 저점 추적 (숏)
+            "trailing_active":      False,
+            "breakeven_set":        False,
+            "funding_rate":         scan_result.get("funding_rate", 0.0),
+            "score":                scan_result["score"],
+            "signals":              scan_result.get("signals", []),
+            "strategy_type":        scan_result.get("strategy_type", "standard"),
+            "strategy_label":       scan_result.get("strategy_label", "표준"),
+            "position_style":       _pos_style,
+            "position_style_label": _pos_style_label,
+            "entry_at":             datetime.now(KST).isoformat(),
         }
 
         logger.info(
@@ -2548,6 +2695,7 @@ class AutoTradeBot:
                 "at":             datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
                 "type":           "entry_forecast",
                 "symbol":         symbol,
+                "side":           side,   # 선물: "long" | "short"
                 "tp_pct":         round(tp_pct, 2),
                 "sl_pct":         round(sl_pct, 2),
                 "win_rate":       round(wr * 100, 1),
@@ -2610,6 +2758,11 @@ class AutoTradeBot:
                 "position_style": pos.get("position_style", "short"),
                 "position_style_label": pos.get("position_style_label", "단타"),
                 "risk_profile": pos.get("risk_profile", "balanced"),
+                "strategy_type": pos.get("strategy_type", "futures_trend"),
+                "strategy_label": pos.get("strategy_label", "선물추세"),
+                "market_type": "futures",
+                "side": pos.get("side", "long"),
+                "leverage": pos.get("leverage", 1),
             }
             self._trade_log.insert(0, record)
             if len(self._trade_log) > MAX_TRADE_LOG:
@@ -2625,7 +2778,7 @@ class AutoTradeBot:
             logger.error(f"AutoBot 선물 청산 실패 {symbol}: {e}")
 
     async def _check_futures_positions(self, scan_results: list[dict]):
-        """선물 포지션 SL/TP 체크 + 청산가 모니터링."""
+        """선물 포지션 SL/TP + 트레일링 + 손익분기 SL + AI 청산 보조."""
         for symbol, pos in list(self._futures_positions.items()):
             price = pos.get("current_price", pos["entry_price"])
             if not price:
@@ -2640,9 +2793,54 @@ class AutoTradeBot:
                     fp["unrealized_pnl"] / invested * 100, 2
                 ) if invested > 0 else 0.0
 
-            side = pos["side"]
-            sl   = pos["stop_loss_price"]
-            tp   = pos["take_profit_price"]
+            side  = pos["side"]
+            entry = pos["entry_price"]
+
+            # 고점/저점 갱신
+            if side == "long":
+                if price > pos.get("highest_price", entry):
+                    pos["highest_price"] = price
+            else:
+                if price < pos.get("lowest_price", entry):
+                    pos["lowest_price"] = price
+
+            pnl_pct   = pos.get("unrealized_pnl_pct", 0.0)
+            tp_pct    = abs(pos["take_profit_price"] - entry) / entry * 100 if not pos.get("trailing_active") else self.settings.get("take_profit_pct", 3.0)
+            sl_pct_val = abs(pos["stop_loss_price"] - entry) / entry * 100
+
+            # ── 트레일링 스탑 ─────────────────────────────────────────────
+            if self.settings.get("trailing_stop"):
+                t_activate = self.settings.get("trailing_activate_pct", tp_pct * 0.8)
+                t_pct      = self.settings.get("trailing_pct", 2.0)
+                if not pos.get("trailing_active") and pnl_pct >= t_activate:
+                    pos["trailing_active"] = True
+                    pos["take_profit_price"] = float("inf") if side == "long" else 0.0
+                    logger.info(f"AutoBot 선물 트레일링 활성화 {symbol} ({side}) pnl={pnl_pct:+.2f}%")
+                if pos.get("trailing_active"):
+                    if side == "long":
+                        trail_sl = pos.get("highest_price", price) * (1 - t_pct / 100)
+                        if trail_sl > pos["stop_loss_price"]:
+                            pos["stop_loss_price"] = trail_sl
+                    else:
+                        trail_sl = pos.get("lowest_price", price) * (1 + t_pct / 100)
+                        if trail_sl < pos["stop_loss_price"]:
+                            pos["stop_loss_price"] = trail_sl
+
+            # ── 손익분기 SL 이동: 이익 TP의 40% 이상 → SL → 진입가 ───────
+            if (pnl_pct >= tp_pct * 0.4
+                    and not pos.get("trailing_active")
+                    and not pos.get("breakeven_set")):
+                if side == "long" and pos["stop_loss_price"] < entry:
+                    pos["stop_loss_price"] = entry
+                    pos["breakeven_set"] = True
+                    logger.info(f"AutoBot 선물 손익분기 SL {symbol} ({side}): SL → {entry:.4f}")
+                elif side == "short" and pos["stop_loss_price"] > entry:
+                    pos["stop_loss_price"] = entry
+                    pos["breakeven_set"] = True
+                    logger.info(f"AutoBot 선물 손익분기 SL {symbol} ({side}): SL → {entry:.4f}")
+
+            sl = pos["stop_loss_price"]
+            tp = pos["take_profit_price"]
 
             # SL/TP 체크
             if side == "long":
@@ -2660,11 +2858,63 @@ class AutoTradeBot:
                     await self._close_futures_position(symbol, price, "take_profit")
                     continue
 
-            # 청산가 5% 이내 접근 → 강제 청산
+            # AI 청산 보조 (수익 구간에서만)
+            ai_threshold = max(sl_pct_val, tp_pct * 0.5)
+            if (
+                pnl_pct >= ai_threshold
+                and ai_analyst.is_ai_available()
+                and self.settings.get("ai_exit_assist", True)
+            ):
+                sl_gap = abs(price - pos["stop_loss_price"]) / price * 100
+                exit_ai = await ai_analyst.check_exit(
+                    symbol=symbol,
+                    pnl_pct=pnl_pct,
+                    strategy_type=pos.get("strategy_type", "standard"),
+                    signals=pos.get("signals", []),
+                    sl_gap_pct=sl_gap,
+                    sl_pct=sl_pct_val,
+                    tp_pct=tp_pct,
+                )
+                if exit_ai["action"] == "close_now":
+                    log_entry = {
+                        "at":      datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+                        "type":    "exit_action",
+                        "symbol":  symbol,
+                        "action":  "close_now",
+                        "pnl_pct": pnl_pct,
+                        "reason":  exit_ai["reason"],
+                    }
+                    self._analysis_log.insert(0, log_entry)
+                    if len(self._analysis_log) > 20:
+                        self._analysis_log.pop()
+                    await self._close_futures_position(symbol, price, "ai_exit")
+                    continue
+                elif exit_ai["action"] == "tighten_sl":
+                    entry = pos["entry_price"]
+                    new_sl = (entry * (1 + (pnl_pct - ai_threshold / 2) / 100)
+                              if side == "long"
+                              else entry * (1 - (pnl_pct - ai_threshold / 2) / 100))
+                    if ((side == "long" and new_sl > pos["stop_loss_price"]) or
+                            (side == "short" and new_sl < pos["stop_loss_price"])):
+                        pos["stop_loss_price"] = new_sl
+                        log_entry = {
+                            "at":      datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+                            "type":    "exit_action",
+                            "symbol":  symbol,
+                            "action":  "tighten_sl",
+                            "pnl_pct": pnl_pct,
+                            "reason":  exit_ai["reason"],
+                        }
+                        self._analysis_log.insert(0, log_entry)
+                        if len(self._analysis_log) > 20:
+                            self._analysis_log.pop()
+
+            # 청산가 2% 이내 접근 → 강제 청산 (SL이 먼저 처리, 여기는 최후 보루)
             liq = pos.get("liquidation_price")
             if liq and liq > 0:
                 distance_pct = abs(price - liq) / price * 100
-                if distance_pct < 5.0:
+                already_liq = (side == "long" and price <= liq) or (side == "short" and price >= liq)
+                if already_liq or distance_pct < 2.0:
                     logger.warning(
                         f"[청산가 경고] {symbol} 청산가 {liq:.4f}까지 {distance_pct:.1f}% — 강제 청산"
                     )

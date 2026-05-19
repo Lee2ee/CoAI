@@ -162,13 +162,15 @@ async def position_close(
 @router.get("/trades")
 async def get_trades(
     limit: int = Query(100, le=500),
+    is_paper: Optional[bool] = Query(None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """DB에 저장된 전체 거래 내역 (최신순)"""
-    result = await db.execute(
-        select(AutoBotTrade).order_by(AutoBotTrade.exit_at.desc()).limit(limit)
-    )
+    """DB에 저장된 전체 거래 내역 (최신순). is_paper=true/false로 필터링 가능."""
+    q = select(AutoBotTrade).order_by(AutoBotTrade.exit_at.desc()).limit(limit)
+    if is_paper is not None:
+        q = q.where(AutoBotTrade.is_paper == is_paper)
+    result = await db.execute(q)
     trades = result.scalars().all()
     return [
         {
@@ -192,6 +194,9 @@ async def get_trades(
             "entry_at": t.entry_at,
             "exit_at": t.exit_at or "",
             "is_paper": t.is_paper,
+            "market_type": t.market_type,
+            "side": t.side,
+            "leverage": t.leverage,
         }
         for t in trades
     ]
@@ -233,11 +238,15 @@ async def get_futures_positions(user: User = Depends(get_current_user)):
 
 @router.get("/trades/stats")
 async def get_trade_stats(
+    is_paper: Optional[bool] = Query(None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """DB 기반 실현 손익 통계"""
-    result = await db.execute(select(AutoBotTrade))
+    """DB 기반 실현 손익 통계. is_paper=true/false로 필터링 가능."""
+    q = select(AutoBotTrade)
+    if is_paper is not None:
+        q = q.where(AutoBotTrade.is_paper == is_paper)
+    result = await db.execute(q)
     trades = result.scalars().all()
     if not trades:
         return {
