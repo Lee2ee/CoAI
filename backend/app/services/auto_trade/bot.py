@@ -2082,16 +2082,26 @@ class AutoTradeBot:
     async def _add_to_position(self, symbol: str, mode: str, price: float):
         """
         mode: "avg_down" (물타기) | "add" (추매)
-        물타기 = 초기 사이즈의 50%, 추매 = 25%
+        투자금 기준: max_portfolio_exposure_pct 초과분(예약 비중)
+          → max_exposure=90% 이면 reserved=total_value×10%, 80%이면 20%
+        물타기 = reserved×50%, 추매 = reserved×25%
         """
         pos = self._positions.get(symbol)
         if pos is None:
             return
         try:
             krw = self._broker.balance.get(self._quote_currency, 0)
+            total_invested_now = sum(
+                p["avg_price"] * p["total_amount"] for p in self._positions.values()
+            )
+            total_value_now = krw + total_invested_now
+            max_exposure_pct = self.settings.get("max_portfolio_exposure_pct", 90.0)
+            # 신규 진입에서 유보한 (100 - max_exposure_pct)% 비중이 물타기/추매 예산
+            reserved_budget = total_value_now * (100.0 - max_exposure_pct) / 100.0
+
             ratio = 0.5 if mode == "avg_down" else 0.25
-            invest_krw = krw * self.settings["position_size_pct"] / 100 * ratio
-            invest_krw = min(invest_krw, krw * 0.5)  # 잔고 50% 초과 금지
+            invest_krw = reserved_budget * ratio
+            invest_krw = min(invest_krw, krw)  # 잔고 초과 방지
 
             min_invest = 5_000 if self._quote_currency == "KRW" else 5
             if invest_krw < min_invest:
@@ -2152,14 +2162,21 @@ class AutoTradeBot:
         await self._pyramid_into_position(symbol, current_price)
 
     async def _pyramid_into_position(self, symbol: str, price: float):
-        """피라미딩: 초기 투자금의 50% 추가 매수 후 평단 재계산 및 SL 재조정."""
+        """피라미딩: reserved_budget(유보 비중)의 50% 추가 매수 후 평단 재계산 및 SL 재조정."""
         pos = self._positions.get(symbol)
         if pos is None:
             return
         try:
             krw = self._broker.balance.get(self._quote_currency, 0)
-            invest_krw = krw * self.settings["position_size_pct"] / 100 * 0.5
-            invest_krw = min(invest_krw, krw * 0.5)
+            total_invested_now = sum(
+                p["avg_price"] * p["total_amount"] for p in self._positions.values()
+            )
+            total_value_now = krw + total_invested_now
+            max_exposure_pct = self.settings.get("max_portfolio_exposure_pct", 90.0)
+            reserved_budget = total_value_now * (100.0 - max_exposure_pct) / 100.0
+
+            invest_krw = reserved_budget * 0.5
+            invest_krw = min(invest_krw, krw)  # 잔고 초과 방지
 
             min_invest = 5_000 if self._quote_currency == "KRW" else 5
             if invest_krw < min_invest:
