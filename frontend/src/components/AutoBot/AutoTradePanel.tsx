@@ -14,7 +14,7 @@ import type {
   StylePreset, AutoBotTradeDB, AutoBotTradeStats, AiAnalysisLogEntry, PerformanceStats,
   FuturesPosition, ExchangeAccount,
 } from '../../types'
-import PositionDetailModal from './PositionDetailModal'
+import PositionDetailModal, { FuturesPositionDetailModal } from './PositionDetailModal'
 import clsx from 'clsx'
 
 // ─── 봇 동작 시간 표시 훅 ──────────────────────────────────────────────────
@@ -46,8 +46,9 @@ const EXCHANGE_COLOR: Record<string, string> = {
   upbit: 'text-blue-400', binance: 'text-yellow-400', bybit: 'text-orange-400',
 }
 
-function fmtCurrency(amount: number, exchangeId?: string): string {
-  if (!exchangeId || exchangeId === 'upbit') {
+function fmtCurrency(amount: number, exchangeIdOrCurrency?: string): string {
+  const isKrw = !exchangeIdOrCurrency || exchangeIdOrCurrency === 'upbit' || exchangeIdOrCurrency === 'KRW'
+  if (isKrw) {
     return amount.toLocaleString('ko-KR') + ' ₩'
   }
   return '$' + amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -343,24 +344,43 @@ function SettingsModal({
             {(form.market_type ?? 'spot') === 'futures' && (
               <div className="mt-3 space-y-3">
                 {/* 레버리지 */}
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <p className="text-xs text-slate-400 flex items-center gap-1">
-                      레버리지
-                      <Tooltip text="내 자산의 N배 규모로 포지션을 열 수 있는 배율입니다. 5x이면 100달러로 500달러 규모 거래 가능. 수익과 손실이 모두 N배로 증폭되며 높을수록 청산 위험이 커집니다." iconOnly />
-                    </p>
-                    <span className="text-xs font-bold text-amber-400">{form.leverage ?? 5}x</span>
-                  </div>
-                  <input
-                    type="range" min={1} max={20} step={1}
-                    value={form.leverage ?? 5}
-                    onChange={e => set('leverage', Number(e.target.value))}
-                    className="w-full accent-amber-500"
-                  />
-                  <div className="flex justify-between text-xs text-slate-600 mt-0.5">
-                    <span>1x</span><span>5x</span><span>10x</span><span>20x</span>
-                  </div>
-                </div>
+                {(() => {
+                  const slPct = (form.stop_loss_pct ?? 2.5) / 100
+                  const capSl   = Math.floor(1.0 / (slPct + 0.005 + 0.005))
+                  const capWarn = Math.floor(1.0 / (0.020  + 0.005 + 0.005))  // ≈33x
+                  const maxSafeLev = Math.max(1, Math.min(capSl, capWarn))
+                  const currentLev = form.leverage ?? 5
+                  const willAdjust = currentLev > maxSafeLev
+                  return (
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <p className="text-xs text-slate-400 flex items-center gap-1">
+                          레버리지
+                          <Tooltip text="내 자산의 N배 규모로 포지션을 열 수 있는 배율입니다. 5x이면 100달러로 500달러 규모 거래 가능. 수익과 손실이 모두 N배로 증폭되며 높을수록 청산 위험이 커집니다." iconOnly />
+                        </p>
+                        <div className="flex items-center gap-2">
+                          {willAdjust && (
+                            <span className="text-xs text-down">→ {maxSafeLev}x 자동조정</span>
+                          )}
+                          <span className="text-xs font-bold text-amber-400">{currentLev}x</span>
+                        </div>
+                      </div>
+                      <input
+                        type="range" min={1} max={50} step={1}
+                        value={currentLev}
+                        onChange={e => set('leverage', Number(e.target.value))}
+                        className="w-full accent-amber-500"
+                      />
+                      <div className="flex justify-between text-xs text-slate-600 mt-0.5">
+                        <span>1x</span><span>10x</span><span>20x</span><span>50x</span>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1">
+                        손절 {form.stop_loss_pct ?? 2.5}% 기준 안전 상한: <span className={willAdjust ? 'text-down' : 'text-up'}>{maxSafeLev}x</span>
+                        {willAdjust && <span className="text-slate-500"> (초과 시 봇이 자동 하향)</span>}
+                      </p>
+                    </div>
+                  )
+                })()}
                 {/* 마진 모드 */}
                 <div>
                   <p className="text-xs text-slate-400 mb-1.5 flex items-center gap-1">
@@ -547,62 +567,73 @@ function SettingsModal({
             </div>
           </div>
 
-          {/* 물타기 */}
-          <div className="border-t border-surface-700 pt-4">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-xs text-slate-400 font-medium flex items-center gap-1">
-                물타기
-                <Tooltip text="평균 단가를 낮추기 위해, 가격이 추가 하락했을 때 동일 종목을 추가 매수하는 전략입니다. (Averaging Down) 하락이 계속되면 손실이 커질 수 있으니 횟수를 제한하세요." iconOnly />
-              </p>
-              <Toggle checked={!!form.auto_avg_down} onChange={v => set('auto_avg_down', v)} />
+          {/* 물타기 / 추매 / 피라미딩 — 현물 전용 */}
+          {(form.market_type ?? 'spot') === 'spot' && (<>
+            {/* 물타기 */}
+            <div className="border-t border-surface-700 pt-4">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs text-slate-400 font-medium flex items-center gap-1">
+                  물타기
+                  <Tooltip text="평균 단가를 낮추기 위해, 가격이 추가 하락했을 때 동일 종목을 추가 매수하는 전략입니다. (Averaging Down) 하락이 계속되면 손실이 커질 수 있으니 횟수를 제한하세요." iconOnly />
+                </p>
+                <Toggle checked={!!form.auto_avg_down} onChange={v => set('auto_avg_down', v)} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <NumRow label="발동 하락 (%)" min={1} max={20} step={0.5}
+                  value={form.avg_down_threshold_pct} onChange={v => set('avg_down_threshold_pct', v)}
+                  tooltip="진입가 대비 이 비율만큼 하락하면 물타기가 자동으로 실행됩니다." />
+                <NumRow label="최대 횟수" min={1} max={5}
+                  value={form.max_avg_down} onChange={v => set('max_avg_down', v)}
+                  tooltip="물타기를 실행할 수 있는 최대 횟수입니다. 초과 시 더 이상 추가 매수하지 않습니다." />
+              </div>
+              {/* 하락장 물타기 모드 */}
+              <div className="flex items-center justify-between mt-3 bg-amber-500/5 border border-amber-500/20 rounded-lg px-3 py-2">
+                <p className="text-xs text-slate-300 flex items-center gap-1.5">
+                  하락장 집중 물타기
+                  <Tooltip text="AI 시장 국면이 '하락장(Downtrend)'으로 감지되면 신규 포지션 진입을 차단하고, 기존 포지션에 물타기만 실행합니다. 평단을 낮춰 반등 시 수익 극대화를 노리는 전략입니다." iconOnly />
+                </p>
+                <Toggle checked={!!form.downtrend_avg_down_mode} onChange={v => set('downtrend_avg_down_mode', v)} />
+              </div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <NumRow label="발동 하락 (%)" min={1} max={20} step={0.5}
-                value={form.avg_down_threshold_pct} onChange={v => set('avg_down_threshold_pct', v)}
-                tooltip="진입가 대비 이 비율만큼 하락하면 물타기가 자동으로 실행됩니다." />
-              <NumRow label="최대 횟수" min={1} max={5}
-                value={form.max_avg_down} onChange={v => set('max_avg_down', v)}
-                tooltip="물타기를 실행할 수 있는 최대 횟수입니다. 초과 시 더 이상 추가 매수하지 않습니다." />
-            </div>
-          </div>
 
-          {/* 추매 */}
-          <div className="border-t border-surface-700 pt-4">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-xs text-slate-400 font-medium flex items-center gap-1">
-                추매
-                <Tooltip text="상승 추세가 지속될 때 동일 종목을 추가 매수하여 수익을 극대화하는 전략입니다. (Adding to a Winner) 이미 오른 가격에 매수하므로 고점 리스크에 유의하세요." iconOnly />
-              </p>
-              <Toggle checked={!!form.auto_add} onChange={v => set('auto_add', v)} />
+            {/* 추매 */}
+            <div className="border-t border-surface-700 pt-4">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs text-slate-400 font-medium flex items-center gap-1">
+                  추매
+                  <Tooltip text="상승 추세가 지속될 때 동일 종목을 추가 매수하여 수익을 극대화하는 전략입니다. (Adding to a Winner) 이미 오른 가격에 매수하므로 고점 리스크에 유의하세요." iconOnly />
+                </p>
+                <Toggle checked={!!form.auto_add} onChange={v => set('auto_add', v)} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <NumRow label="발동 상승 (%)" min={1} max={20} step={0.5}
+                  value={form.add_threshold_pct} onChange={v => set('add_threshold_pct', v)}
+                  tooltip="진입가 대비 이 비율만큼 상승하면 추매가 자동으로 실행됩니다." />
+                <NumRow label="최대 횟수" min={1} max={3}
+                  value={form.max_add} onChange={v => set('max_add', v)}
+                  tooltip="추매를 실행할 수 있는 최대 횟수입니다." />
+              </div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <NumRow label="발동 상승 (%)" min={1} max={20} step={0.5}
-                value={form.add_threshold_pct} onChange={v => set('add_threshold_pct', v)}
-                tooltip="진입가 대비 이 비율만큼 상승하면 추매가 자동으로 실행됩니다." />
-              <NumRow label="최대 횟수" min={1} max={3}
-                value={form.max_add} onChange={v => set('max_add', v)}
-                tooltip="추매를 실행할 수 있는 최대 횟수입니다." />
-            </div>
-          </div>
 
-          {/* 피라미딩 */}
-          <div className="border-t border-surface-700 pt-4">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-xs text-slate-400 font-medium flex items-center gap-1">
-                피라미딩
-                <Tooltip text="포지션이 수익 구간(발동 수익률 이상)에 진입하고, 현재 시장 신호 점수가 최소 점수 이상일 때 초기 투자금의 50%를 추가 매수합니다. 수익 중인 포지션을 단계적으로 키워 수익을 극대화하는 전략입니다." iconOnly />
-              </p>
-              <Toggle checked={!!form.pyramid_enabled} onChange={v => set('pyramid_enabled', v)} />
+            {/* 피라미딩 */}
+            <div className="border-t border-surface-700 pt-4">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs text-slate-400 font-medium flex items-center gap-1">
+                  피라미딩
+                  <Tooltip text="포지션이 수익 구간(발동 수익률 이상)에 진입하고, 현재 시장 신호 점수가 최소 점수 이상일 때 초기 투자금의 50%를 추가 매수합니다. 수익 중인 포지션을 단계적으로 키워 수익을 극대화하는 전략입니다." iconOnly />
+                </p>
+                <Toggle checked={!!form.pyramid_enabled} onChange={v => set('pyramid_enabled', v)} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <NumRow label="발동 수익 (%)" min={1} max={20} step={0.5}
+                  value={form.pyramid_threshold_pct ?? 3} onChange={v => set('pyramid_threshold_pct', v)}
+                  tooltip="미실현 수익이 이 비율 이상이고 최신 스코어가 최소 점수를 넘으면 피라미딩이 실행됩니다." />
+                <NumRow label="최대 횟수" min={1} max={3}
+                  value={form.max_pyramid ?? 2} onChange={v => set('max_pyramid', v)}
+                  tooltip="피라미딩을 실행할 수 있는 최대 횟수입니다." />
+              </div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <NumRow label="발동 수익 (%)" min={1} max={20} step={0.5}
-                value={form.pyramid_threshold_pct ?? 3} onChange={v => set('pyramid_threshold_pct', v)}
-                tooltip="미실현 수익이 이 비율 이상이고 최신 스코어가 최소 점수를 넘으면 피라미딩이 실행됩니다." />
-              <NumRow label="최대 횟수" min={1} max={3}
-                value={form.max_pyramid ?? 2} onChange={v => set('max_pyramid', v)}
-                tooltip="피라미딩을 실행할 수 있는 최대 횟수입니다." />
-            </div>
-          </div>
+          </>)}
 
         </div>
 
@@ -938,14 +969,14 @@ function PositionCard({ pos, onClick, exchangeId }: { pos: AutoBotPosition; onCl
         </div>
       )}
 
-      <p className="text-xs text-slate-600 text-right">클릭하여 상세 차트 보기 →</p>
+      <p className="text-xs text-slate-500 text-right">클릭하여 상세 차트 보기 →</p>
     </div>
   )
 }
 
 // ─── 선물 포지션 카드 ─────────────────────────────────────────────────────────
 
-function FuturesPositionCard({ pos }: { pos: FuturesPosition }) {
+function FuturesPositionCard({ pos, onClick, krwRate }: { pos: FuturesPosition; onClick?: () => void; krwRate: number | null }) {
   const pnlPos = pos.unrealized_pnl_pct >= 0
   const isLong = pos.side === 'long'
   const liqPct = pos.liquidation_price
@@ -953,7 +984,7 @@ function FuturesPositionCard({ pos }: { pos: FuturesPosition }) {
     : null
 
   return (
-    <div className="bg-surface-700 rounded-lg p-3 space-y-2 border border-surface-600">
+    <div className="bg-surface-700 rounded-lg p-3 space-y-2 border border-surface-600 cursor-pointer hover:border-brand-500/50 transition-colors" onClick={onClick}>
       {/* 헤더 */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 flex-wrap">
@@ -977,14 +1008,24 @@ function FuturesPositionCard({ pos }: { pos: FuturesPosition }) {
 
       {/* 증거금 → 미실현 PnL */}
       <div className="flex items-center gap-2 bg-surface-600/60 rounded-lg px-2.5 py-1.5 text-xs">
-        <span className="text-slate-400">증거금</span>
-        <span className="font-mono font-semibold text-slate-100 tabular-nums">
-          ${pos.initial_margin.toFixed(2)}
-        </span>
-        <span className="text-slate-600 mx-0.5">→</span>
-        <span className={clsx('font-mono font-semibold tabular-nums ml-auto', pnlPos ? 'text-up' : 'text-down')}>
-          {pnlPos ? '+' : ''}${pos.unrealized_pnl_usdt.toFixed(4)}
-        </span>
+        <div>
+          <span className="text-slate-400">증거금 </span>
+          <span className="font-mono font-semibold text-slate-100 tabular-nums">${pos.initial_margin.toFixed(2)}</span>
+          {krwRate !== null && (
+            <span className="text-slate-500 ml-1">≈ ₩{Math.round(pos.initial_margin * krwRate).toLocaleString('ko-KR')}</span>
+          )}
+        </div>
+        <span className="text-slate-600 mx-0.5 ml-auto">→</span>
+        <div className="text-right">
+          <span className={clsx('font-mono font-semibold tabular-nums', pnlPos ? 'text-up' : 'text-down')}>
+            {pnlPos ? '+' : ''}${pos.unrealized_pnl_usdt.toFixed(4)}
+          </span>
+          {krwRate !== null && (
+            <span className={clsx('ml-1 text-xs', pnlPos ? 'text-up/60' : 'text-down/60')}>
+              ≈ ₩{Math.round(pos.unrealized_pnl_usdt * krwRate).toLocaleString('ko-KR')}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* 세부 정보 */}
@@ -1033,6 +1074,7 @@ function FuturesPositionCard({ pos }: { pos: FuturesPosition }) {
           </span>
         </div>
       )}
+      <p className="text-xs text-slate-400 text-right">클릭하여 상세 보기 →</p>
     </div>
   )
 }
@@ -1049,6 +1091,16 @@ function ScanRow({ r, rank }: { r: ScanResult; rank: number }) {
       <div className="flex items-center gap-3">
         <span className="text-xs text-slate-500 w-4">{rank}</span>
         <span className="text-sm font-medium text-slate-200 w-24">{r.symbol}</span>
+        {r.side && (
+          <span className={clsx(
+            'text-xs px-1.5 py-0.5 rounded font-bold border',
+            r.side === 'long'
+              ? 'bg-up/20 text-up border-up/30'
+              : 'bg-down/20 text-down border-down/30'
+          )}>
+            {r.side === 'long' ? '롱' : '숏'}
+          </span>
+        )}
         <span className={clsx('text-xs px-1.5 py-0.5 rounded font-medium', stratColor)}>
           {r.strategy_label}
         </span>
@@ -1078,12 +1130,23 @@ const REASON_LABEL: Record<string, string> = {
   trailing_stop: '트레일링', ai_exit: 'AI청산',
 }
 
+const REASON_DESC: Record<string, string> = {
+  take_profit:          '목표 수익률에 도달하여 자동 익절',
+  trailing_stop:        '고점 대비 하락폭 초과로 트레일링 스탑 발동',
+  ai_exit:              'AI가 최적 청산 타이밍으로 판단하여 청산',
+  manual:               '사용자가 직접 수동 청산',
+  liquidation_warning:  '증거금 부족으로 강제 청산 위험 감지',
+  timeout:              '보유 시간 초과로 자동 청산',
+}
+
 const REASON_COLOR: Record<string, string> = {
-  stop_loss:     'bg-down/20 text-down',
-  take_profit:   'bg-up/20 text-up',
-  trailing_stop: 'bg-brand-500/20 text-brand-400',
-  ai_exit:       'bg-purple-500/20 text-purple-400',
-  manual:        'bg-surface-600 text-slate-400',
+  stop_loss:            'bg-down/20 text-down',
+  take_profit:          'bg-up/20 text-up',
+  trailing_stop:        'bg-brand-500/20 text-brand-400',
+  ai_exit:              'bg-purple-500/20 text-purple-400',
+  manual:               'bg-surface-600 text-slate-400',
+  liquidation_warning:  'bg-red-500/20 text-red-400',
+  timeout:              'bg-surface-600 text-slate-400',
 }
 
 function calcDuration(entryAt: string, exitAt: string): string {
@@ -1115,10 +1178,14 @@ function fmtKst(iso: string): string {
 
 function LogRow({ t, exchangeId }: { t: AutoBotTradeLog | AutoBotTradeDB; exchangeId?: string }) {
   const pos = t.pnl_pct >= 0
+  const isFuturesRow = t.market_type === 'futures'
   // stop_loss인데 수익이면 "손절"이 아닌 "SL보호" (진입가 위에서 SL 발동)
   const reasonLabel = t.exit_reason === 'stop_loss'
     ? (t.pnl_pct > 0 ? 'SL보호' : '손절')
     : (REASON_LABEL[t.exit_reason] ?? t.exit_reason)
+  const reasonDesc = t.exit_reason === 'stop_loss'
+    ? (t.pnl_pct > 0 ? '진입가 위에서 손절선 발동 — 손실 없이 보호 청산' : `손절가에 도달하여 자동 청산 (${t.pnl_pct.toFixed(2)}%)`)
+    : (REASON_DESC[t.exit_reason] ?? null)
   const reasonColor = t.exit_reason === 'stop_loss'
     ? (t.pnl_pct > 0 ? 'bg-amber-500/20 text-amber-400' : 'bg-down/20 text-down')
     : (REASON_COLOR[t.exit_reason] ?? 'bg-surface-600 text-slate-400')
@@ -1133,6 +1200,22 @@ function LogRow({ t, exchangeId }: { t: AutoBotTradeLog | AutoBotTradeDB; exchan
       {/* ── 1행: 심볼 + 배지 + 손익 ── */}
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-sm font-bold text-slate-100">{t.symbol}</span>
+        {isFuturesRow && (
+          <span className="px-1.5 py-0.5 rounded font-medium bg-purple-500/20 text-purple-300 border border-purple-500/30">
+            선물
+          </span>
+        )}
+        {isFuturesRow && t.side && (
+          <span className={clsx(
+            'px-1.5 py-0.5 rounded font-bold border',
+            t.side === 'long'
+              ? 'bg-up/20 text-up border-up/30'
+              : 'bg-down/20 text-down border-down/30'
+          )}>
+            {t.side === 'long' ? '롱' : '숏'}
+            {t.leverage && t.leverage > 1 ? ` ${t.leverage}x` : ''}
+          </span>
+        )}
         {'strategy_label' in t && t.strategy_label && (
           <span className={clsx('px-1.5 py-0.5 rounded font-medium', stratColor)}>
             {t.strategy_label}
@@ -1165,30 +1248,37 @@ function LogRow({ t, exchangeId }: { t: AutoBotTradeLog | AutoBotTradeDB; exchan
           {pos ? '+' : ''}{t.pnl_pct.toFixed(2)}%
         </span>
         <span className={clsx('font-mono font-semibold tabular-nums text-sm', pos ? 'text-up' : 'text-down')}>
-          {pos ? '+' : ''}{fmtCurrency(t.pnl_krw, exchangeId)}
+          {pos ? '+' : ''}{fmtCurrency(t.pnl_krw, isFuturesRow ? 'USDT' : exchangeId)}
         </span>
       </div>
 
       {/* ── 2행: 가격 / 금액 ── */}
       <div className="flex items-center gap-1.5 bg-surface-700/60 rounded px-2.5 py-1.5 font-mono flex-wrap">
-        <span className="text-slate-500">매수</span>
-        <span className="text-amber-400 font-semibold">{fmtCurrency(t.avg_price, exchangeId)}</span>
+        <span className="text-slate-500">
+          {isFuturesRow ? (t.side === 'short' ? '숏진입' : '롱진입') : '매수'}
+        </span>
+        <span className="text-amber-400 font-semibold">{fmtCurrency(t.avg_price, isFuturesRow ? 'USDT' : exchangeId)}</span>
         <span className="text-slate-600 mx-0.5">×</span>
         <span className="text-slate-300">{t.total_amount.toFixed(6)} {base}</span>
         <span className="text-slate-600 mx-1">=</span>
-        <span className="text-slate-200">{fmtCurrency(investKrw, exchangeId)}</span>
+        <span className="text-slate-200">{fmtCurrency(investKrw, isFuturesRow ? 'USDT' : exchangeId)}</span>
         <span className="text-slate-600 mx-1">→</span>
-        <span className="text-slate-500">매도</span>
+        <span className="text-slate-500">{isFuturesRow ? '청산' : '매도'}</span>
         <span className={clsx('font-semibold', pos ? 'text-up' : 'text-down')}>
-          {fmtCurrency(t.exit_price, exchangeId)}
+          {fmtCurrency(t.exit_price, isFuturesRow ? 'USDT' : exchangeId)}
         </span>
         <span className="text-slate-600 mx-0.5">=</span>
         <span className={clsx(pos ? 'text-up/80' : 'text-down/80')}>
-          {fmtCurrency(exitKrw, exchangeId)}
+          {fmtCurrency(exitKrw, isFuturesRow ? 'USDT' : exchangeId)}
         </span>
       </div>
 
-      {/* ── 3행: 진입 시각 / 청산 시각 / 보유 기간 ── */}
+      {/* ── 3행: 거래 설명 ── */}
+      {reasonDesc && (
+        <div className="text-slate-400 text-xs px-0.5">{reasonDesc}</div>
+      )}
+
+      {/* ── 4행: 진입 시각 / 청산 시각 / 보유 기간 ── */}
       <div className="flex items-center gap-2 text-slate-500 flex-wrap">
         <Clock size={10} className="flex-shrink-0" />
         <span>진입 <span className="text-slate-300">{fmtKst(t.entry_at)}</span></span>
@@ -1218,7 +1308,8 @@ export default function AutoTradePanel() {
   const qc = useQueryClient()
   const [showSettings, setShowSettings] = useState(false)
   const [selectedPos, setSelectedPos] = useState<AutoBotPosition | null>(null)
-  const [tab, setTab] = useState<'positions' | 'scan' | 'log' | 'ai' | 'perf'>('positions')
+  const [selectedFuturesPos, setSelectedFuturesPos] = useState<FuturesPosition | null>(null)
+  const [tab, setTab] = useState<'positions' | 'scan' | 'log' | 'ai' | 'forecast' | 'perf'>('positions')
   const [showLiveModal, setShowLiveModal] = useState(false)
   const [confirmDialog, setConfirmDialog] = useState<{
     message: string
@@ -1234,15 +1325,17 @@ export default function AutoTradePanel() {
     refetchInterval: 3_000,
   })
 
+  const _isPaper = status?.settings?.is_paper ?? true
+
   const { data: dbTrades } = useQuery<AutoBotTradeDB[]>({
-    queryKey: ['auto-bot-trades'],
-    queryFn: async () => (await api.get('/auto-bot/trades')).data,
+    queryKey: ['auto-bot-trades', _isPaper],
+    queryFn: async () => (await api.get(`/auto-bot/trades?is_paper=${_isPaper}`)).data,
     refetchInterval: tab === 'log' ? 5_000 : 30_000,
   })
 
   const { data: tradeStats } = useQuery<AutoBotTradeStats>({
-    queryKey: ['auto-bot-trade-stats'],
-    queryFn: async () => (await api.get('/auto-bot/trades/stats')).data,
+    queryKey: ['auto-bot-trade-stats', _isPaper],
+    queryFn: async () => (await api.get(`/auto-bot/trades/stats?is_paper=${_isPaper}`)).data,
     refetchInterval: 10_000,
   })
 
@@ -1255,6 +1348,15 @@ export default function AutoTradePanel() {
     queryFn: async () => (await api.get('/ai-config')).data,
     refetchInterval: false,
   })
+
+  const { data: rateData, isError: rateError } = useQuery<{ rate: number }>({
+    queryKey: ['usdt-krw-rate'],
+    queryFn: async () => (await api.get('/market/usdt-krw-rate')).data,
+    refetchInterval: 60_000,
+    staleTime: 60_000,
+    retry: 1,
+  })
+  const krwRate: number | null = rateData?.rate ?? null
 
   const uptime = useUptime(status?.started_at ?? null)
 
@@ -1326,6 +1428,9 @@ export default function AutoTradePanel() {
   const livePos = selectedPos
     ? status.positions.find(p => p.symbol === selectedPos.symbol) ?? null
     : null
+  const liveFuturesPos = selectedFuturesPos
+    ? (status.futures_positions ?? []).find(p => p.symbol === selectedFuturesPos.symbol) ?? null
+    : null
 
   return (
     <>
@@ -1364,6 +1469,14 @@ export default function AutoTradePanel() {
           onClose={() => setSelectedPos(null)}
           exchangeId={exchangeId}
           feeRate={status.fee_rate}
+        />
+      )}
+
+      {liveFuturesPos && (
+        <FuturesPositionDetailModal
+          pos={liveFuturesPos}
+          onClose={() => setSelectedFuturesPos(null)}
+          krwRate={krwRate}
         />
       )}
 
@@ -1515,13 +1628,16 @@ export default function AutoTradePanel() {
         {/* 통계 */}
         <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
           <div className={clsx('bg-surface-700 rounded-lg p-2.5', !isPaper && 'border border-down/30')}>
-            <p className="text-xs text-slate-500">{isPaper ? '모의 잔고' : '실거래 잔고'}</p>
+            <p className="text-xs text-slate-500">
+              {isPaper ? '모의 잔고' : '실거래 잔고'}
+              <span className="ml-1 text-slate-600">({status.quote_currency ?? (exchangeId === 'upbit' ? 'KRW' : 'USDT')})</span>
+            </p>
             {balanceEdit ? (
               <div className="flex items-center gap-1 mt-0.5">
                 <input
                   type="number"
                   className="w-full bg-surface-600 text-slate-100 text-xs rounded px-1.5 py-0.5 tabular-nums"
-                  placeholder={exchangeId === 'upbit' ? 'KRW 입력' : 'USDT 입력'}
+                  placeholder={`${status.quote_currency ?? (exchangeId === 'upbit' ? 'KRW' : 'USDT')} 입력`}
                   value={balanceInput}
                   onChange={e => setBalanceInput(e.target.value)}
                   onKeyDown={e => {
@@ -1544,7 +1660,7 @@ export default function AutoTradePanel() {
             ) : (
               <div className="flex items-center gap-1 mt-0.5">
                 <p className="text-sm font-semibold tabular-nums text-slate-100">
-                  {fmtCurrency(status.balance_krw, exchangeId)}
+                  {fmtCurrency(status.balance_krw, status.quote_currency ?? exchangeId)}
                 </p>
                 <button
                   className={status.running ? 'text-slate-600 cursor-not-allowed' : 'text-slate-500 hover:text-slate-300'}
@@ -1557,13 +1673,13 @@ export default function AutoTradePanel() {
               </div>
             )}
           </div>
-          <StatCard label="총 평가" value={fmtCurrency(status.total_value_krw, exchangeId)} />
+          <StatCard label={`총 평가 (${status.quote_currency ?? (exchangeId === 'upbit' ? 'KRW' : 'USDT')})`} value={fmtCurrency(status.total_value_krw, status.quote_currency ?? exchangeId)} />
           <StatCard label="수수료" value={`${+((status.fee_rate ?? 0.0005) * 100).toFixed(3)}%`} />
           <StatCard
-            label="실현 손익 (누적)"
+            label={`실현 손익 (${status.quote_currency ?? (exchangeId === 'upbit' ? 'KRW' : 'USDT')})`}
             value={(() => {
               const pnl = tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.total_trades > 0 ? status.realized_pnl_krw : null
-              return pnl !== null ? `${pnl >= 0 ? '+' : ''}${fmtCurrency(pnl, exchangeId)}` : '—'
+              return pnl !== null ? `${pnl >= 0 ? '+' : ''}${fmtCurrency(pnl, status.quote_currency ?? exchangeId)}` : '—'
             })()}
             color={(() => {
               const pnl = tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.total_trades > 0 ? status.realized_pnl_krw : null
@@ -1585,7 +1701,7 @@ export default function AutoTradePanel() {
         </div>
 
         {/* 종합 미실현 손익 (포지션 있을 때만) */}
-        {status.positions.length > 0 && (
+        {!isFutures && status.positions.length > 0 && (
           <div className={clsx(
             'rounded-lg px-4 py-3 border flex items-center justify-between flex-wrap gap-3',
             status.unrealized_pnl_krw >= 0
@@ -1626,6 +1742,68 @@ export default function AutoTradePanel() {
           </div>
         )}
 
+        {/* 선물 종합 미실현 손익 배너 */}
+        {isFutures && (status.futures_positions ?? []).length > 0 && (
+          <div className={clsx(
+            'rounded-lg px-4 py-3 border flex items-center justify-between flex-wrap gap-3',
+            status.unrealized_pnl_krw >= 0 ? 'bg-up/5 border-up/20' : 'bg-down/5 border-down/20'
+          )}>
+            <div>
+              <p className="text-xs text-slate-500 mb-0.5">
+                종합 미실현 손익 ({(status.futures_positions ?? []).length}개 포지션)
+              </p>
+              <div className="flex items-baseline gap-2 flex-wrap">
+                <span className={clsx(
+                  'text-xl font-bold tabular-nums',
+                  status.unrealized_pnl_krw >= 0 ? 'text-up' : 'text-down'
+                )}>
+                  {status.unrealized_pnl_krw >= 0 ? '+' : ''}
+                  ${(status.unrealized_pnl_krw as number).toFixed(4)}
+                </span>
+                <span className={clsx(
+                  'text-sm font-semibold',
+                  status.unrealized_pnl_pct >= 0 ? 'text-up' : 'text-down'
+                )}>
+                  ({status.unrealized_pnl_pct >= 0 ? '+' : ''}{status.unrealized_pnl_pct.toFixed(2)}%)
+                </span>
+              </div>
+              {krwRate !== null ? (
+                <p className="text-xs text-slate-500 mt-0.5">
+                  ≈ ₩{Math.round((status.unrealized_pnl_krw as number) * krwRate).toLocaleString('ko-KR')}
+                </p>
+              ) : rateError && (
+                <p className="text-xs text-amber-500 mt-0.5">환율 조회 실패</p>
+              )}
+            </div>
+            <div className="text-xs text-right space-y-0.5">
+              {(status.futures_positions ?? []).map(p => (
+                <div key={p.symbol} className="flex items-center gap-2">
+                  <span className="text-slate-400 w-24 text-left font-medium">{p.symbol}</span>
+                  <span className={clsx(
+                    'px-1 rounded text-xs font-bold',
+                    p.side === 'long' ? 'text-up' : 'text-down'
+                  )}>
+                    {p.side === 'long' ? '롱' : '숏'} {p.leverage}x
+                  </span>
+                  <span className={clsx('tabular-nums font-semibold', p.unrealized_pnl_pct >= 0 ? 'text-up' : 'text-down')}>
+                    {p.unrealized_pnl_pct >= 0 ? '+' : ''}{p.unrealized_pnl_pct.toFixed(2)}%
+                  </span>
+                  <div className="text-right">
+                    <div className={clsx('tabular-nums', p.unrealized_pnl_usdt >= 0 ? 'text-up/70' : 'text-down/70')}>
+                      {p.unrealized_pnl_usdt >= 0 ? '+' : ''}${p.unrealized_pnl_usdt.toFixed(4)}
+                    </div>
+                    {krwRate !== null && (
+                      <div className="text-slate-500">
+                        ≈ ₩{Math.round(p.unrealized_pnl_usdt * krwRate).toLocaleString('ko-KR')}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* 설정 요약 */}
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400 bg-surface-700 rounded-lg px-3 py-2">
           <span>타임프레임 <b className="text-slate-200">{status.settings.timeframe}</b></span>
@@ -1635,9 +1813,11 @@ export default function AutoTradePanel() {
           <span>익절 <b className="text-up">{status.settings.take_profit_pct}%</b></span>
           <span>최대 <b className="text-slate-200">{status.settings.max_positions}개</b></span>
           <span>일손실한도 <b className="text-amber-400">{status.settings.max_daily_loss_pct ?? 5}%</b></span>
-          <span>물타기 <b className={status.settings.auto_avg_down ? 'text-amber-400' : 'text-slate-500'}>{status.settings.auto_avg_down ? `ON (${status.settings.avg_down_threshold_pct}%)` : 'OFF'}</b></span>
-          <span>추매 <b className={status.settings.auto_add ? 'text-up' : 'text-slate-500'}>{status.settings.auto_add ? `ON (${status.settings.add_threshold_pct}%)` : 'OFF'}</b></span>
-          <span>피라미딩 <b className={status.settings.pyramid_enabled ? 'text-brand-400' : 'text-slate-500'}>{status.settings.pyramid_enabled ? `ON (${status.settings.pyramid_threshold_pct ?? 3}%)` : 'OFF'}</b></span>
+          {!isFutures && (<>
+            <span>물타기 <b className={status.settings.auto_avg_down ? 'text-amber-400' : 'text-slate-500'}>{status.settings.auto_avg_down ? `ON (${status.settings.avg_down_threshold_pct}%)` : 'OFF'}</b>{status.settings.downtrend_avg_down_mode && <span className="ml-1 text-amber-300/80 text-xs">하락장집중</span>}</span>
+            <span>추매 <b className={status.settings.auto_add ? 'text-up' : 'text-slate-500'}>{status.settings.auto_add ? `ON (${status.settings.add_threshold_pct}%)` : 'OFF'}</b></span>
+            <span>피라미딩 <b className={status.settings.pyramid_enabled ? 'text-brand-400' : 'text-slate-500'}>{status.settings.pyramid_enabled ? `ON (${status.settings.pyramid_threshold_pct ?? 3}%)` : 'OFF'}</b></span>
+          </>)}
           {isFutures && (
             <span className="text-amber-400 font-medium">
               선물 {status.settings.leverage ?? 5}x · {status.settings.margin_mode === 'isolated' ? 'Isolated' : 'Cross'}
@@ -1654,10 +1834,11 @@ export default function AutoTradePanel() {
         {/* 탭 */}
         <div className="flex gap-1 border-b border-surface-700">
           {([
-            ['positions', `포지션 (${status.positions.length})`],
+            ['positions', `포지션 (${isFutures ? (status.futures_positions ?? []).length : status.positions.length})`],
             ['scan', `스캔 결과 (${status.scan_results.length})`],
             ['log', `거래 내역 (${tradeStats?.total ?? status.total_trades})`],
             ['ai', `AI 활동 (${status.ai_analysis_log?.length ?? 0})`],
+            ['forecast', `예상 수익 (${status.forecast_log?.length ?? 0})`],
             ['perf', '성과 분석'],
           ] as const).map(([key, label]) => (
             <button
@@ -1688,7 +1869,7 @@ export default function AutoTradePanel() {
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
                 {(status.futures_positions ?? []).map(p => (
-                  <FuturesPositionCard key={p.symbol} pos={p} />
+                  <FuturesPositionCard key={p.symbol} pos={p} onClick={() => setSelectedFuturesPos(p)} krwRate={krwRate} />
                 ))}
               </div>
             )
@@ -1731,6 +1912,10 @@ export default function AutoTradePanel() {
           />
         )}
 
+        {tab === 'forecast' && (
+          <ForecastTab log={status.forecast_log ?? []} />
+        )}
+
         {tab === 'perf' && (
           <PerformancePanel
             perf={status.performance ?? {
@@ -1751,42 +1936,72 @@ export default function AutoTradePanel() {
             {/* 실현 손익 요약 */}
             {((tradeStats && tradeStats.total > 0) || status.total_trades > 0) && (
               <div className={clsx(
-                'rounded-lg px-4 py-3 border flex flex-wrap gap-4 text-xs mb-2',
+                'rounded-lg border text-xs mb-2 overflow-hidden',
                 (tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.realized_pnl_krw) >= 0
-                  ? 'bg-up/5 border-up/20' : 'bg-down/5 border-down/20'
+                  ? 'border-up/20' : 'border-down/20'
               )}>
-                <div>
-                  <p className="text-slate-500 mb-0.5">누적 실현 손익{!(tradeStats && tradeStats.total > 0) && ' (세션)'}</p>
-                  {(() => {
-                    const pnl = tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.realized_pnl_krw
-                    const initial = status.total_value_krw - status.realized_pnl_krw - status.unrealized_pnl_krw
-                    const pct = initial > 0 ? pnl / initial * 100 : null
-                    const pos = pnl >= 0
-                    return (
-                      <div className="flex items-baseline gap-1.5">
-                        <p className={clsx('text-base font-bold tabular-nums', pos ? 'text-up' : 'text-down')}>
-                          {pos ? '+' : ''}{fmtCurrency(pnl, exchangeId)}
-                        </p>
-                        {pct !== null && (
-                          <span className={clsx('text-xs font-semibold tabular-nums', pos ? 'text-up/70' : 'text-down/70')}>
-                            ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)
-                          </span>
-                        )}
+                {/* 윗줄: 손익 합산 3분할 */}
+                {(() => {
+                  const trades = dbTrades && dbTrades.length > 0 ? dbTrades : status.trade_log
+                  const pnl = tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.realized_pnl_krw
+                  const initial = status.total_value_krw - status.realized_pnl_krw - status.unrealized_pnl_krw
+                  const pct = initial > 0 ? pnl / initial * 100 : null
+                  const profitSum = trades.filter(t => t.pnl_krw > 0).reduce((s, t) => s + t.pnl_krw, 0)
+                  const lossSum   = trades.filter(t => t.pnl_krw < 0).reduce((s, t) => s + t.pnl_krw, 0)
+                  const netPos = pnl >= 0
+                  return (
+                    <div className="grid grid-cols-3 divide-x divide-surface-700">
+                      <div className="px-4 py-3 bg-up/5">
+                        <p className="text-slate-500 mb-1">+수익 합계</p>
+                        <p className="text-up font-bold tabular-nums text-sm">+{fmtCurrency(profitSum, exchangeId)}</p>
                       </div>
-                    )
-                  })()}
-                </div>
-                <div><p className="text-slate-500 mb-0.5">총 거래</p><p className="text-slate-200 font-semibold">{tradeStats?.total ?? status.total_trades}건</p></div>
-                {tradeStats && tradeStats.total > 0 && <>
-                  <div><p className="text-slate-500 mb-0.5">승률</p><p className="text-slate-200 font-semibold">{tradeStats.win_rate}%</p></div>
-                  <div><p className="text-slate-500 mb-0.5">평균 손익</p>
-                    <p className={clsx('font-semibold', tradeStats.avg_pnl_pct >= 0 ? 'text-up' : 'text-down')}>
-                      {tradeStats.avg_pnl_pct >= 0 ? '+' : ''}{tradeStats.avg_pnl_pct.toFixed(2)}%
-                    </p>
+                      <div className="px-4 py-3 bg-down/5">
+                        <p className="text-slate-500 mb-1">-손해 합계</p>
+                        <p className="text-down font-bold tabular-nums text-sm">{fmtCurrency(lossSum, exchangeId)}</p>
+                      </div>
+                      <div className="px-4 py-3">
+                        <p className="text-slate-500 mb-1">합계{!(tradeStats && tradeStats.total > 0) && ' (세션)'}</p>
+                        <div className="flex items-baseline gap-1">
+                          <p className={clsx('font-bold tabular-nums text-sm', netPos ? 'text-up' : 'text-down')}>
+                            {netPos ? '+' : ''}{fmtCurrency(pnl, exchangeId)}
+                          </p>
+                          {pct !== null && (
+                            <span className={clsx('tabular-nums', netPos ? 'text-up/70' : 'text-down/70')}>
+                              ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })()}
+                {/* 아랫줄: 통계 지표 */}
+                <div className="flex flex-wrap gap-x-6 gap-y-1 px-4 py-2.5 border-t border-surface-700 bg-surface-800/40">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-slate-500">총 거래</span>
+                    <span className="text-slate-200 font-semibold">{tradeStats?.total ?? status.total_trades}건</span>
                   </div>
-                  <div><p className="text-slate-500 mb-0.5">최고</p><p className="text-up font-semibold">+{tradeStats.best_trade_pct.toFixed(2)}%</p></div>
-                  <div><p className="text-slate-500 mb-0.5">최저</p><p className="text-down font-semibold">{tradeStats.worst_trade_pct.toFixed(2)}%</p></div>
-                </>}
+                  {tradeStats && tradeStats.total > 0 && <>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-500">승률</span>
+                      <span className="text-slate-200 font-semibold">{tradeStats.win_rate}%</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-500">평균 손익</span>
+                      <span className={clsx('font-semibold', tradeStats.avg_pnl_pct >= 0 ? 'text-up' : 'text-down')}>
+                        {tradeStats.avg_pnl_pct >= 0 ? '+' : ''}{tradeStats.avg_pnl_pct.toFixed(2)}%
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-500">최고</span>
+                      <span className="text-up font-semibold">+{tradeStats.best_trade_pct.toFixed(2)}%</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-500">최저</span>
+                      <span className="text-down font-semibold">{tradeStats.worst_trade_pct.toFixed(2)}%</span>
+                    </div>
+                  </>}
+                </div>
               </div>
             )}
             {(() => {
@@ -1991,6 +2206,63 @@ function AiLogEntry({ entry }: { entry: AiAnalysisLogEntry }) {
               <span className="px-1.5 py-0.5 rounded bg-surface-600 text-slate-300">5m</span>
             </div>
             <p className="text-slate-400 mt-1">5m 병렬 스캔 · scalping 스타일</p>
+          </div>
+          <span className="text-slate-600 flex-shrink-0">{entry.at}</span>
+        </div>
+      </div>
+    )
+  }
+
+  if (type === 'entry_forecast') {
+    const fc = entry.forecast
+    const ev = entry.ev_per_trade ?? 0
+    const fmtPct = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`
+    const periods: [string, '1d' | '1w' | '1m' | '1y'][] = [['1일', '1d'], ['1주', '1w'], ['1달', '1m'], ['1년', '1y']]
+    return (
+      <div className="py-3 border-b border-surface-700 last:border-0 text-xs space-y-2">
+        <div className="flex items-start gap-2">
+          <TrendingUp size={14} className="mt-0.5 flex-shrink-0 text-brand-400" />
+          <div className="flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-medium text-slate-200">예상 수익 분석</span>
+              <span className="text-slate-300 font-mono">{entry.symbol}</span>
+              <span className="px-1.5 py-0.5 rounded bg-surface-600 text-slate-400">
+                TP +{entry.tp_pct}% / SL -{entry.sl_pct}%
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-surface-600 text-slate-400">
+                승률 {entry.win_rate}%
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 mt-1 text-slate-400">
+              <span>거래당 기대값</span>
+              <span className={clsx('font-semibold', ev >= 0 ? 'text-up' : 'text-down')}>{fmtPct(ev)}</span>
+              {entry.leverage && entry.leverage > 1 && (
+                <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-semibold">{entry.leverage}x</span>
+              )}
+              {entry.fee_pct !== undefined && (
+                <span className="text-slate-600">수수료 -{entry.fee_pct}% 포함</span>
+              )}
+              {entry.position_style && (
+                <span className="text-slate-600">· {entry.position_style}</span>
+              )}
+            </div>
+            {fc && (
+              <div className="grid grid-cols-4 gap-1 mt-2">
+                {periods.map(([label, key]) => {
+                  const val = fc[key]
+                  const isMax = val >= 9999
+                  return (
+                    <div key={label} className="bg-surface-800 rounded px-2 py-1.5 text-center">
+                      <div className="text-slate-500 text-[10px] mb-0.5">{label}</div>
+                      <div className={clsx('font-semibold text-[11px]', val >= 0 ? 'text-up' : 'text-down')}>
+                        {isMax ? '—' : fmtPct(val)}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+            <p className="text-slate-600 text-[10px] mt-1.5">* 수수료 포함·선형 추정. 실제 수익을 보장하지 않습니다.</p>
           </div>
           <span className="text-slate-600 flex-shrink-0">{entry.at}</span>
         </div>
@@ -2243,6 +2515,135 @@ function AiActivityLog({
           {log.map((entry, i) => <AiLogEntry key={i} entry={entry} />)}
         </div>
       )}
+    </div>
+  )
+}
+
+function ForecastTab({ log }: { log: AiAnalysisLogEntry[] }) {
+  if (log.length === 0) {
+    return (
+      <div className="py-8 text-center text-sm text-slate-500">
+        <TrendingUp size={24} className="mx-auto mb-2 text-slate-600" />
+        <p>아직 예상 수익 데이터가 없습니다.</p>
+        <p className="text-xs mt-1 text-slate-600">봇이 포지션에 진입하면 자동으로 기록됩니다.</p>
+      </div>
+    )
+  }
+
+  const fmtPct = (v: number, isMax: boolean) => isMax ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`
+  const periods: ('1d' | '1w' | '1m' | '1y')[] = ['1d', '1w', '1m', '1y']
+
+  const colHeaders: { key: string; label: string; tooltip: string }[] = [
+    {
+      key: 'ev',
+      label: '거래 EV',
+      tooltip: '거래 1건당 기대 수익률.\n(승률 × TP%) − (패률 × SL%) − 수수료\n양수면 장기적으로 수익, 음수면 손실 구조.',
+    },
+    {
+      key: '1d',
+      label: '1일 예상',
+      tooltip: '하루 동안 예상되는 누적 수익률.\n거래 EV × 하루 예상 거래 횟수 (선형 추정).',
+    },
+    {
+      key: '1w',
+      label: '1주 예상',
+      tooltip: '1주일(7일) 동안 예상되는 누적 수익률.\n거래 EV × 주간 예상 거래 횟수 (선형 추정).',
+    },
+    {
+      key: '1m',
+      label: '1달 예상',
+      tooltip: '1달(30일) 동안 예상되는 누적 수익률.\n거래 EV × 월간 예상 거래 횟수 (선형 추정).',
+    },
+    {
+      key: '1y',
+      label: '1년 예상',
+      tooltip: '1년(365일) 동안 예상되는 누적 수익률.\n거래 EV × 연간 예상 거래 횟수 (선형 추정).\n단순 참고치로 실제와 큰 차이가 날 수 있습니다.',
+    },
+    {
+      key: 'wr',
+      label: '승률',
+      tooltip: '최근 거래 이력 기반 실제 승률.\n거래 이력이 5건 미만이면 기본값 50% 적용.',
+    },
+  ]
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-slate-500">* 수수료 포함·선형 추정치. 복리 미적용. 실제 수익을 보장하지 않습니다.</p>
+
+      {/* 헤더 */}
+      <div className="grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto] gap-x-3 text-[10px] text-slate-500 px-3 py-1">
+        <span>종목 / 진입 시각</span>
+        {colHeaders.map(h => (
+          <Tooltip key={h.key} text={h.tooltip}>
+            <span className="text-right cursor-help underline decoration-dotted decoration-slate-600">{h.label}</span>
+          </Tooltip>
+        ))}
+      </div>
+
+      <div className="divide-y divide-surface-700">
+        {log.map((entry, i) => {
+          const fc = entry.forecast
+          const ev = entry.ev_per_trade ?? 0
+          const evPos = ev >= 0
+          const isDefaultWr = !entry.win_rate_basis || entry.win_rate_basis === 0
+          return (
+            <div key={i} className="grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto] gap-x-3 items-center px-3 py-2.5 text-xs hover:bg-surface-700/40 transition-colors">
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-slate-200 font-medium">{entry.symbol}</span>
+                  {entry.side && (
+                    <span className={clsx(
+                      'px-1 rounded font-bold text-[10px]',
+                      entry.side === 'long' ? 'bg-up/20 text-up' : 'bg-down/20 text-down'
+                    )}>
+                      {entry.side === 'long' ? '롱' : '숏'}
+                    </span>
+                  )}
+                  {entry.position_style && (
+                    <span className="px-1 rounded bg-surface-600 text-slate-400 text-[10px]">
+                      {STYLE_LABEL[entry.position_style] ?? entry.position_style}
+                    </span>
+                  )}
+                  {entry.leverage && entry.leverage > 1 && (
+                    <span className="px-1 rounded bg-amber-500/20 text-amber-300 font-semibold text-[10px]">{entry.leverage}x</span>
+                  )}
+                </div>
+                <div className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-1.5">
+                  <span>{entry.at}</span>
+                  <span className="text-slate-600">TP+{entry.tp_pct}% / SL-{entry.sl_pct}%</span>
+                  {entry.fee_pct !== undefined && (
+                    <span className="text-slate-600">수수료 {entry.fee_pct}%</span>
+                  )}
+                </div>
+              </div>
+
+              {/* 거래 EV */}
+              <span className={clsx('text-right tabular-nums font-semibold', evPos ? 'text-up' : 'text-down')}>
+                {evPos ? '+' : ''}{ev.toFixed(2)}%
+              </span>
+
+              {/* 1일~1년 */}
+              {fc ? periods.map(p => {
+                const val = fc[p]
+                const isMax = val >= 9999
+                return (
+                  <span key={p} className={clsx('text-right tabular-nums font-semibold', isMax ? 'text-slate-500' : val >= 0 ? 'text-up' : 'text-down')}>
+                    {fmtPct(val, isMax)}
+                  </span>
+                )
+              }) : periods.map(p => <span key={p} className="text-right text-slate-600">—</span>)}
+
+              {/* 승률 */}
+              <Tooltip text={isDefaultWr ? '거래 이력 5건 미만 — 기본값 50% 적용 중입니다.\n실거래가 쌓이면 실제 승률로 업데이트됩니다.' : `최근 ${entry.win_rate_basis}건 거래 기반 실제 승률`}>
+                <span className={clsx('text-right tabular-nums cursor-help', isDefaultWr ? 'text-slate-500' : 'text-slate-300')}>
+                  {entry.win_rate}%
+                  {isDefaultWr && <span className="text-slate-600 text-[9px] ml-0.5">(기본)</span>}
+                </span>
+              </Tooltip>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }

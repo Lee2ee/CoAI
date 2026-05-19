@@ -159,7 +159,7 @@ export default function SettingsPage() {
   const paidProviders  = Object.entries(providers).filter(([, m]) => m.tier === 'paid')
   const currentMeta    = providers[provider]
   const currentModels  = currentMeta?.models ?? []
-  const isDirty        = provider !== cfg.provider || model !== cfg.model || !!apiKey
+  const isDirty        = provider !== cfg.provider || model !== cfg.model || !!apiKey || ollamaUrl !== cfg.ollama_url
 
   return (
     <div className="max-w-2xl space-y-6">
@@ -171,9 +171,12 @@ export default function SettingsPage() {
       {/* ── AI 기능 개별 설정 ────────────────────────────────────────────── */}
       {aiEnabled && botStatus && (
         <div className="card space-y-4">
-          <div className="flex items-center gap-2 pb-3 border-b border-surface-700">
-            <Cpu size={16} className="text-brand-400" />
-            <h2 className="font-semibold text-slate-100">AI 기능 설정</h2>
+          <div className="flex items-center justify-between pb-3 border-b border-surface-700">
+            <div className="flex items-center gap-2">
+              <Cpu size={16} className="text-brand-400" />
+              <h2 className="font-semibold text-slate-100">AI 기능 설정</h2>
+            </div>
+            <span className="text-xs text-slate-500">토글 변경 즉시 적용</span>
           </div>
 
           {(

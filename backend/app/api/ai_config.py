@@ -60,6 +60,15 @@ PROVIDERS_META: dict = {
         "models": ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"],
         "key_url": "https://platform.openai.com/api-keys",
     },
+    "grok": {
+        "label": "Grok (xAI)",
+        "desc": "xAI의 Grok 모델. OpenAI 호환 API.",
+        "tier": "paid",
+        "needs_key": True,
+        "needs_url": False,
+        "models": ["grok-3-mini", "grok-3", "grok-2"],
+        "key_url": "https://console.x.ai",
+    },
 }
 
 
@@ -208,6 +217,17 @@ async def test_connection(
                 )
             ok = res.status_code == 200
             return {"ok": ok, "message": "OpenAI 연결 성공" if ok else f"OpenAI 오류: {res.status_code}"}
+
+        elif provider == "grok":
+            if not api_key:
+                return {"ok": False, "message": "API 키가 설정되지 않았습니다."}
+            async with httpx.AsyncClient(timeout=10) as client:
+                res = await client.get(
+                    "https://api.x.ai/v1/models",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+            ok = res.status_code == 200
+            return {"ok": ok, "message": "Grok 연결 성공" if ok else f"Grok 오류: {res.status_code}"}
 
         return {"ok": False, "message": "알 수 없는 프로바이더"}
 

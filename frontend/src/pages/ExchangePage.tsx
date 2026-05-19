@@ -216,9 +216,10 @@ export default function ExchangePage() {
     try {
       const res = await api.get(`/exchange-accounts/${account.id}/test`)
       const price = res.data.btc_price
-      const priceStr = meta.quote === 'KRW'
+      const quote = res.data.quote ?? (meta.quote === 'KRW' ? 'KRW' : 'USDT')
+      const priceStr = quote === 'KRW'
         ? price?.toLocaleString('ko-KR') + ' ₩'
-        : '$' + price?.toLocaleString('en-US', { minimumFractionDigits: 0 })
+        : price?.toLocaleString('en-US', { minimumFractionDigits: 1 }) + ' USDT'
       setTestResults((prev) => ({
         ...prev,
         [account.id]: res.data.ok

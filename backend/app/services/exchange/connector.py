@@ -81,15 +81,76 @@ class ExchangeConnector:
             "timeout": REQUEST_TIMEOUT,
             # sandbox 미사용: 시세는 항상 실거래소 공개 API 사용
         })
-        # 업비트는 Windows에서 aiohttp ThreadedResolver 필요 (비동기 DNS 문제)
-        # 다른 거래소는 기본 세션 사용
-        if exchange_id == "upbit":
+        # Bybit /v5/asset/coin/query-info 는 "Asset Transfer" 권한 필요.
+        # 일반 트레이딩 키로는 403이 나므로 currencies 조회를 비활성화.
+        if exchange_id == "bybit":
+            self._exchange.has["fetchCurrencies"] = False
+        # Windows에서 aiohttp 비동기 DNS 버그 → ThreadedResolver 적용 (upbit, binance 모두)
+        if exchange_id in ("upbit", "binance"):
             _connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
             self._exchange.session = aiohttp.ClientSession(connector=_connector)
+
+    # Bybit 타임프레임 → API interval 변환
+    _BYBIT_INTERVAL = {
+        "1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
+        "1h": "60", "4h": "240", "1d": "D", "1w": "W", "1M": "M",
+    }
+
+    async def _fetch_bybit_ohlcv(
+        self, symbol: str, timeframe: str, limit: int
+    ) -> pd.DataFrame:
+        interval = self._BYBIT_INTERVAL.get(timeframe, "60")
+        ccxt_symbol = symbol.replace("/", "")
+        MAX_PER = MAX_PER_REQUEST_BY_EXCHANGE.get("bybit", 200)
+        tf_ms = TIMEFRAME_MAP.get(timeframe, 3_600_000)
+
+        raw: list = []
+        end_time: int | None = None
+
+        connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+        async with aiohttp.ClientSession(connector=connector) as session:
+            while len(raw) < limit:
+                fetch_n = min(MAX_PER, limit - len(raw))
+                url = (
+                    f"https://api.bybit.com/v5/market/kline"
+                    f"?category=spot&symbol={ccxt_symbol}&interval={interval}&limit={fetch_n}"
+                )
+                if end_time is not None:
+                    url += f"&end={end_time}"
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    data = await resp.json()
+                items = (data.get("result") or {}).get("list") or []
+                if not items:
+                    break
+                # Bybit 응답: 최신 봉이 먼저 → 역순 정렬
+                # [startTime, open, high, low, close, volume, turnover]
+                batch = [
+                    [int(row[0]), float(row[1]), float(row[2]),
+                     float(row[3]), float(row[4]), float(row[5])]
+                    for row in items
+                ]
+                batch.sort(key=lambda x: x[0])
+                raw = batch + raw
+                if len(items) < fetch_n:
+                    break
+                end_time = batch[0][0] - 1  # 이전 구간으로 이동
+                if end_time <= 0:
+                    break
+
+        raw = raw[-limit:]
+        if not raw:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df.set_index("timestamp", inplace=True)
+        return df.astype(float)
 
     async def fetch_ohlcv(
         self, symbol: str, timeframe: str = "1h", limit: int = 500
     ) -> pd.DataFrame:
+        if self.exchange_id == "bybit":
+            return await self._fetch_bybit_ohlcv(symbol, timeframe, limit)
+
         MAX_PER_REQUEST = MAX_PER_REQUEST_BY_EXCHANGE.get(self.exchange_id, 200)
 
         if limit <= MAX_PER_REQUEST:
@@ -140,7 +201,31 @@ class ExchangeConnector:
         return df.astype(float)
 
     async def fetch_ticker(self, symbol: str) -> dict:
+        # Bybit: loadMarkets() 가 instruments-info 를 호출해 실패하는 경우가 있음.
+        # 공개 ticker API 직접 호출로 우회.
+        if self.exchange_id == "bybit":
+            return await self._fetch_bybit_ticker(symbol)
         return await self._exchange.fetch_ticker(symbol)
+
+    async def _fetch_bybit_ticker(self, symbol: str) -> dict:
+        ccxt_symbol = symbol.replace("/", "")  # BTC/USDT → BTCUSDT
+        connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+        async with aiohttp.ClientSession(connector=connector) as session:
+            url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={ccxt_symbol}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                data = await resp.json()
+        items = (data.get("result") or {}).get("list") or []
+        if not items:
+            raise RuntimeError(f"Bybit ticker 조회 실패: {data.get('retMsg', 'unknown')}")
+        t = items[0]
+        last = float(t["lastPrice"])
+        return {
+            "last":        last,
+            "bid":         float(t.get("bid1Price") or last),
+            "ask":         float(t.get("ask1Price") or last),
+            "percentage":  float(t.get("price24hPcnt", "0")) * 100,
+            "quoteVolume": float(t.get("turnover24h") or 0),
+        }
 
     async def fetch_balance(self) -> dict:
         if self.is_paper:
@@ -266,6 +351,9 @@ class BinanceFuturesConnector:
         if testnet:
             self._exchange.set_sandbox_mode(True)
         self.testnet = testnet
+        # Windows aiohttp 비동기 DNS 버그 → ThreadedResolver 적용
+        _conn = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+        self._exchange.session = aiohttp.ClientSession(connector=_conn)
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:
         """심볼별 레버리지 설정. leverage: 1~125 (기본 5)."""

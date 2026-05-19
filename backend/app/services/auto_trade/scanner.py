@@ -858,16 +858,267 @@ FUTURES_SYMBOLS = [
     "BCH/USDT", "APT/USDT", "OP/USDT", "ARB/USDT",
 ]
 
+# ── 선물 전용 전략 설정 ───────────────────────────────────────────────────────
+# 선물은 레버리지 특성상 SL/TP 폭이 현물보다 좁음 (빠른 청산 방지)
+FUTURES_STRATEGY_STYLE_CONFIGS: dict[str, dict[str, dict]] = {
+    "futures_trend": {           # ADX 추세 추종 — 추세 지속 기대, 넓은 TP
+        "scalping": {"sl_pct": 1.0,  "tp_pct": 2.5},
+        "short":    {"sl_pct": 1.5,  "tp_pct": 5.0},
+        "mid":      {"sl_pct": 2.5,  "tp_pct": 8.0},
+        "long":     {"sl_pct": 4.0,  "tp_pct": 13.0},
+    },
+    "futures_breakout": {        # BB/ATR 돌파 — 빠른 진입·청산
+        "scalping": {"sl_pct": 0.8,  "tp_pct": 2.0},
+        "short":    {"sl_pct": 1.2,  "tp_pct": 3.5},
+        "mid":      {"sl_pct": 2.0,  "tp_pct": 6.0},
+        "long":     {"sl_pct": 3.5,  "tp_pct": 10.0},
+    },
+    "futures_momentum": {        # MACD+RSI 모멘텀 — 중간 보유
+        "scalping": {"sl_pct": 0.9,  "tp_pct": 2.2},
+        "short":    {"sl_pct": 1.3,  "tp_pct": 4.0},
+        "mid":      {"sl_pct": 2.2,  "tp_pct": 6.5},
+        "long":     {"sl_pct": 3.5,  "tp_pct": 11.0},
+    },
+}
+
+FUTURES_STRATEGY_LABELS: dict[str, str] = {
+    "futures_trend":    "추세 추종",
+    "futures_breakout": "돌파 진입",
+    "futures_momentum": "강한 모멘텀",
+}
+
+
+def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
+    """
+    선물 전용 전략 스코어링 (롱/숏 양방향).
+
+    전략:
+      futures_trend     — ADX 기반 추세 추종. 방향성 있는 시장에서 최적.
+      futures_breakout  — BB/ATR 돌파. 변동성 확장 구간에서 최적.
+      futures_momentum  — MACD+RSI 모멘텀. 추세 전환 초입에서 최적.
+
+    3전략 × 롱/숏 = 6가지 후보 중 최고 점수 선택.
+    """
+    current_price = float(df["close"].iloc[-1])
+    df = df.iloc[:-1]  # bar-close: 미완성봉 제외
+
+    _empty = {
+        "symbol": symbol, "score": 0, "rsi": 50.0, "price": current_price,
+        "signals": [], "strategy_type": "standard", "strategy_label": "표준",
+        "sl_pct": None, "tp_pct": None, "style": style, "side": "long",
+        "volume_ratio": 0.0, "price_change_pct": 0.0,
+        "mtf_trend": "neutral", "mtf_confirmed": True,
+        "adx": 0.0, "mr_score": 0, "mr_signals": [], "bb_mid": 0.0, "bb_lower": 0.0,
+    }
+    if len(df) < 60:
+        return _empty
+
+    close  = df["close"]
+    high   = df["high"]
+    low    = df["low"]
+    volume = df["volume"]
+
+    # ── 공통 지표 ────────────────────────────────────────────────────────────
+    rsi_s = ta.rsi(close, length=14)
+    rsi = float(rsi_s.iloc[-1]) if rsi_s is not None and not rsi_s.empty else 50.0
+
+    ema20  = ta.ema(close, length=20)
+    ema50  = ta.ema(close, length=50)
+    ema100 = ta.ema(close, length=100)
+    e20  = float(ema20.iloc[-1])  if ema20  is not None and len(ema20.dropna())  > 0 else 0.0
+    e50  = float(ema50.iloc[-1])  if ema50  is not None and len(ema50.dropna())  > 0 else 0.0
+    e100 = float(ema100.iloc[-1]) if ema100 is not None and len(ema100.dropna()) > 0 else 0.0
+
+    adx_df = ta.adx(high, low, close, length=14)
+    adx = dmi_plus = dmi_minus = 0.0
+    if adx_df is not None and len(adx_df.dropna()) > 0:
+        cols = adx_df.columns.tolist()
+        adx       = float(adx_df[cols[0]].iloc[-1])
+        dmi_plus  = float(adx_df[cols[1]].iloc[-1])
+        dmi_minus = float(adx_df[cols[2]].iloc[-1])
+
+    macd_df = ta.macd(close, fast=12, slow=26, signal=9)
+    macd_line = macd_hist = signal_line = 0.0
+    crossed_up = crossed_down = False
+    if macd_df is not None and len(macd_df.dropna()) >= 2:
+        cols = macd_df.columns.tolist()
+        macd_line  = float(macd_df[cols[0]].iloc[-1])
+        macd_hist  = float(macd_df[cols[1]].iloc[-1])
+        signal_line = float(macd_df[cols[2]].iloc[-1])
+        macd_prev  = float(macd_df[cols[0]].iloc[-2])
+        sig_prev   = float(macd_df[cols[2]].iloc[-2])
+        crossed_up   = macd_line > signal_line and macd_prev <= sig_prev
+        crossed_down = macd_line < signal_line and macd_prev >= sig_prev
+
+    bb = ta.bbands(close, length=20)
+    bb_upper = bb_lower = bb_mid = 0.0
+    if bb is not None and len(bb.dropna()) > 0:
+        bc = bb.columns.tolist()
+        bb_lower = float(bb[bc[0]].iloc[-1])
+        bb_mid   = float(bb[bc[1]].iloc[-1])
+        bb_upper = float(bb[bc[2]].iloc[-1])
+
+    atr_s = ta.atr(high, low, close, length=14)
+    atr = float(atr_s.iloc[-1]) if atr_s is not None and not atr_s.empty else 0.0
+    atr_avg = float(atr_s.iloc[-14:-1].mean()) if atr_s is not None and len(atr_s) >= 14 else atr
+    atr_expanding = atr > atr_avg * 1.2 if atr_avg > 0 else False
+
+    vol_avg   = float(volume.iloc[-21:-1].mean()) if len(volume) >= 21 else 1.0
+    vol_now   = float(volume.iloc[-1])
+    vol_ratio = vol_now / vol_avg if vol_avg > 0 else 1.0
+    price_now = float(close.iloc[-1])
+    price_change_pct = float((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100) if len(close) >= 2 else 0.0
+
+    # ── Strategy 1: futures_trend ─────────────────────────────────────────────
+    def _trend(side: str) -> tuple[int, list[str]]:
+        sc = 0; sg: list[str] = []
+        if adx >= 35:
+            sc += 35; sg.append(f"ADX 강한 추세 ({adx:.1f})")
+        elif adx >= 25:
+            sc += 20; sg.append(f"ADX 추세 ({adx:.1f})")
+        else:
+            return 0, []  # 추세 미확인 → 전략 무효
+
+        if side == "long":
+            if dmi_plus > dmi_minus:
+                sc += 15; sg.append(f"+DI > -DI (상승)")
+            if e20 > 0 and e50 > 0 and e100 > 0 and e20 > e50 > e100:
+                sc += 20; sg.append("EMA 완전 정배열 ▲")
+            elif e20 > 0 and e50 > 0 and e20 > e50:
+                sc += 10; sg.append("EMA 상승 배열")
+            if 45 <= rsi <= 65:
+                sc += 20; sg.append(f"RSI 모멘텀 존 ({rsi:.1f})")
+            elif 35 <= rsi < 45:
+                sc += 8;  sg.append(f"RSI 회복 중 ({rsi:.1f})")
+        else:  # short
+            if dmi_minus > dmi_plus:
+                sc += 15; sg.append(f"-DI > +DI (하락)")
+            if e20 > 0 and e50 > 0 and e100 > 0 and e20 < e50 < e100:
+                sc += 20; sg.append("EMA 완전 역배열 ▼")
+            elif e20 > 0 and e50 > 0 and e20 < e50:
+                sc += 10; sg.append("EMA 하락 배열")
+            if 35 <= rsi <= 55:
+                sc += 20; sg.append(f"RSI 하락 모멘텀 ({rsi:.1f})")
+            elif 55 < rsi <= 65:
+                sc += 8;  sg.append(f"RSI 과열 식는 중 ({rsi:.1f})")
+
+        if vol_ratio >= 1.5:
+            sc += 10; sg.append(f"거래량 증가 ({vol_ratio:.1f}x)")
+        return sc, sg
+
+    # ── Strategy 2: futures_breakout ─────────────────────────────────────────
+    def _breakout(side: str) -> tuple[int, list[str]]:
+        sc = 0; sg: list[str] = []
+        if side == "long":
+            if bb_upper > 0 and price_now > bb_upper:
+                sc += 30; sg.append("BB 상단 돌파 ↑")
+            elif bb_mid > 0 and price_now > bb_mid and vol_ratio >= 1.8:
+                sc += 15; sg.append("BB 중단 돌파 + 거래량 급증")
+            else:
+                return 0, []
+            if rsi > 55:
+                sc += 15; sg.append(f"RSI 모멘텀 ({rsi:.1f})")
+        else:
+            if bb_lower > 0 and price_now < bb_lower:
+                sc += 30; sg.append("BB 하단 이탈 ↓")
+            elif bb_mid > 0 and price_now < bb_mid and vol_ratio >= 1.8:
+                sc += 15; sg.append("BB 중단 하락 돌파 + 거래량 급증")
+            else:
+                return 0, []
+            if rsi < 45:
+                sc += 15; sg.append(f"RSI 하락 모멘텀 ({rsi:.1f})")
+
+        if vol_ratio >= 2.5:
+            sc += 30; sg.append(f"거래량 급등 ({vol_ratio:.1f}x)")
+        elif vol_ratio >= 1.8:
+            sc += 20; sg.append(f"거래량 급증 ({vol_ratio:.1f}x)")
+        elif vol_ratio >= 1.3:
+            sc += 10; sg.append(f"거래량 증가 ({vol_ratio:.1f}x)")
+
+        if atr_expanding:
+            sc += 15; sg.append("변동성 확대 (ATR↑)")
+        return sc, sg
+
+    # ── Strategy 3: futures_momentum ─────────────────────────────────────────
+    def _momentum(side: str) -> tuple[int, list[str]]:
+        sc = 0; sg: list[str] = []
+        if side == "long":
+            if crossed_up:
+                sc += 30; sg.append("MACD 골든크로스 ↑")
+            elif macd_line > signal_line and macd_hist > 0:
+                sc += 15; sg.append("MACD 상승 모멘텀")
+            if 50 <= rsi <= 70:
+                sc += 20; sg.append(f"RSI 상승 모멘텀 ({rsi:.1f})")
+            elif 45 <= rsi < 50:
+                sc += 10; sg.append(f"RSI 상승 전환 ({rsi:.1f})")
+            if e20 > 0 and e50 > 0 and e20 > e50:
+                sc += 10; sg.append("EMA 상승 배열")
+        else:
+            if crossed_down:
+                sc += 30; sg.append("MACD 데드크로스 ↓")
+            elif macd_line < signal_line and macd_hist < 0:
+                sc += 15; sg.append("MACD 하락 모멘텀")
+            if 30 <= rsi <= 50:
+                sc += 20; sg.append(f"RSI 하락 모멘텀 ({rsi:.1f})")
+            elif 50 < rsi <= 55:
+                sc += 10; sg.append(f"RSI 하락 전환 ({rsi:.1f})")
+            if e20 > 0 and e50 > 0 and e20 < e50:
+                sc += 10; sg.append("EMA 하락 배열")
+
+        if vol_ratio >= 1.5:
+            sc += 20; sg.append(f"거래량 증가 ({vol_ratio:.1f}x)")
+        elif vol_ratio >= 1.2:
+            sc += 10; sg.append(f"거래량 소폭 증가 ({vol_ratio:.1f}x)")
+
+        return (sc, sg) if sc >= 20 else (0, [])  # 최소 임계값 미달 → 무효
+
+    # ── 최강 후보 선택 ────────────────────────────────────────────────────────
+    candidates: list[tuple[str, str, int, list[str]]] = []
+    for strat, fn in [("futures_trend", _trend), ("futures_breakout", _breakout), ("futures_momentum", _momentum)]:
+        for side in ("long", "short"):
+            sc, sg = fn(side)
+            if sc > 0:
+                candidates.append((strat, side, sc, sg))
+
+    if not candidates:
+        return {**_empty, "rsi": rsi, "adx": adx, "volume_ratio": vol_ratio,
+                "bb_mid": bb_mid, "bb_lower": bb_lower, "price_change_pct": price_change_pct}
+
+    strategy_type, side, score, signals = max(candidates, key=lambda x: x[2])
+    cfg = FUTURES_STRATEGY_STYLE_CONFIGS.get(strategy_type, {}).get(style, {})
+
+    return {
+        "symbol":           symbol,
+        "score":            score,
+        "rsi":              rsi,
+        "price":            current_price,
+        "signals":          signals,
+        "strategy_type":    strategy_type,
+        "strategy_label":   FUTURES_STRATEGY_LABELS[strategy_type],
+        "sl_pct":           cfg.get("sl_pct"),
+        "tp_pct":           cfg.get("tp_pct"),
+        "style":            style,
+        "side":             side,
+        "volume_ratio":     vol_ratio,
+        "price_change_pct": price_change_pct,
+        "mtf_trend":        "bullish" if side == "long" else "bearish",
+        "mtf_confirmed":    True,
+        "adx":              adx,
+        "mr_score":         0,
+        "mr_signals":       [],
+        "bb_mid":           bb_mid,
+        "bb_lower":         bb_lower,
+    }
+
 
 async def scan_futures_market(
-    connector,          # BinanceFuturesConnector
+    connector,
     timeframe: str = "1h",
     style: str = "short",
 ) -> list[dict]:
     """
-    Binance Futures USDT-M 종목 스캔.
-    롱/숏 양방향 신호 감지 + 펀딩비 조정.
-    반환 dict에 'side': 'long'|'short' 필드 추가.
+    선물 종목 스캔 — 선물 전용 전략 3종 (추세/돌파/모멘텀) × 롱/숏 적용.
+    펀딩비로 점수 보정 후 최고 점수 종목 반환.
     """
     results = []
     for symbol in FUTURES_SYMBOLS:
@@ -879,64 +1130,9 @@ async def scan_futures_market(
             if len(df) < 60:
                 continue
 
-            # 기존 _score() 로 롱 신호 점수 계산
-            result = _score(df, symbol, style, htf_df=None)
+            result = _score_futures(df, symbol, style)
 
-            # ── 숏 신호 계산 ──────────────────────────────────────────────────
-            close  = df["close"]
-            volume = df["volume"]
-
-            rsi_series = ta.rsi(close, length=14)
-            rsi = float(rsi_series.iloc[-1]) if rsi_series is not None and len(rsi_series) > 0 else 50.0
-
-            ema20 = ta.ema(close, length=20)
-            ema50 = ta.ema(close, length=50)
-            vol_avg = float(volume.iloc[-21:-1].mean()) if len(volume) >= 21 else 0.0
-            vol_now = float(volume.iloc[-1])
-            vol_ratio = vol_now / vol_avg if vol_avg > 0 else 1.0
-
-            short_score   = 0
-            short_signals: list[str] = []
-
-            if rsi > 70:
-                short_score += 25
-                short_signals.append(f"RSI 과매수 ({rsi:.1f})")
-            elif rsi > 65:
-                short_score += 12
-                short_signals.append(f"RSI 과열 ({rsi:.1f})")
-
-            if (ema20 is not None and ema50 is not None
-                    and len(ema20.dropna()) > 1 and len(ema50.dropna()) > 1):
-                e20_now  = float(ema20.iloc[-1])
-                e50_now  = float(ema50.iloc[-1])
-                e20_prev = float(ema20.iloc[-2])
-                e50_prev = float(ema50.iloc[-2])
-                if e20_now < e50_now and e20_prev >= e50_prev:
-                    short_score += 20
-                    short_signals.append("EMA 데드크로스 ✕")
-                elif e20_now < e50_now:
-                    short_score += 10
-                    short_signals.append("하락추세 (EMA20 < EMA50)")
-
-            macd_df = ta.macd(close, fast=12, slow=26, signal=9)
-            if macd_df is not None and len(macd_df.dropna()) >= 2:
-                cols   = macd_df.columns.tolist()
-                ml_now  = float(macd_df[cols[0]].iloc[-1])
-                ml_prev = float(macd_df[cols[0]].iloc[-2])
-                sg_now  = float(macd_df[cols[2]].iloc[-1])
-                sg_prev = float(macd_df[cols[2]].iloc[-2])
-                if ml_now < sg_now and ml_prev >= sg_prev:
-                    short_score += 20
-                    short_signals.append("MACD 데드크로스 ↓")
-                elif ml_now < sg_now:
-                    short_score += 8
-                    short_signals.append("MACD 약세")
-
-            if vol_ratio < 0.7:
-                short_score += 8
-                short_signals.append(f"거래량 감소 ({vol_ratio:.1f}x)")
-
-            # ── 펀딩비 조정 ───────────────────────────────────────────────────
+            # ── 펀딩비 보정 ───────────────────────────────────────────────────
             funding_rate = 0.0
             try:
                 funding_rate = await asyncio.wait_for(
@@ -946,20 +1142,13 @@ async def scan_futures_market(
                 pass
             result["funding_rate"] = funding_rate
 
-            if funding_rate > 0.001:      # 롱 비용 증가 → 롱 점수 차감
+            # 펀딩비가 진입 방향에 불리하면 점수 차감
+            if result["side"] == "long" and funding_rate > 0.001:
                 result["score"] = max(0, result["score"] - 10)
-                result["signals"].append(f"펀딩비 높음 ({funding_rate * 100:.4f}%)")
-            elif funding_rate < -0.001:   # 숏 비용 증가 → 숏 점수 차감
-                short_score = max(0, short_score - 10)
-                short_signals.append(f"음수 펀딩비 ({funding_rate * 100:.4f}%)")
-
-            # ── 더 강한 방향 선택 ─────────────────────────────────────────────
-            if short_score > result["score"] and short_score >= 40:
-                result["score"]   = short_score
-                result["signals"] = short_signals
-                result["side"]    = "short"
-            else:
-                result["side"] = "long"
+                result["signals"].append(f"펀딩비 불리 ({funding_rate * 100:.4f}%)")
+            elif result["side"] == "short" and funding_rate < -0.001:
+                result["score"] = max(0, result["score"] - 10)
+                result["signals"].append(f"음수 펀딩비 불리 ({funding_rate * 100:.4f}%)")
 
             results.append(result)
             await asyncio.sleep(0.2)
