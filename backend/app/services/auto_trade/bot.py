@@ -2897,6 +2897,7 @@ class AutoTradeBot:
             "trade_log": logs[:20],
             "scan_results": self._scan_results[:10],
             "last_scan_at": self._last_scan_at,
+            "quote_currency": "KRW",
             "balance_krw": round(krw),
             "fee_rate": self._broker.fee_rate,
             "total_value_krw": round(total_value),
@@ -2958,7 +2959,8 @@ class AutoTradeBot:
             "trade_log": logs[:20],
             "scan_results": self._scan_results[:10],
             "last_scan_at": self._last_scan_at,
-            "balance_krw": round(usdt, 4),   # USDT 잔고
+            "quote_currency": "USDT",
+            "balance_krw": round(usdt, 4),
             "fee_rate": FUTURES_FEE_RATE,
             "total_value_krw": round(total_value, 4),
             "unrealized_pnl_krw": round(total_unrealized, 4),

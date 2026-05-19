@@ -46,8 +46,9 @@ const EXCHANGE_COLOR: Record<string, string> = {
   upbit: 'text-blue-400', binance: 'text-yellow-400', bybit: 'text-orange-400',
 }
 
-function fmtCurrency(amount: number, exchangeId?: string): string {
-  if (!exchangeId || exchangeId === 'upbit') {
+function fmtCurrency(amount: number, exchangeIdOrCurrency?: string): string {
+  const isKrw = !exchangeIdOrCurrency || exchangeIdOrCurrency === 'upbit' || exchangeIdOrCurrency === 'KRW'
+  if (isKrw) {
     return amount.toLocaleString('ko-KR') + ' ₩'
   }
   return '$' + amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -1515,13 +1516,16 @@ export default function AutoTradePanel() {
         {/* 통계 */}
         <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
           <div className={clsx('bg-surface-700 rounded-lg p-2.5', !isPaper && 'border border-down/30')}>
-            <p className="text-xs text-slate-500">{isPaper ? '모의 잔고' : '실거래 잔고'}</p>
+            <p className="text-xs text-slate-500">
+              {isPaper ? '모의 잔고' : '실거래 잔고'}
+              <span className="ml-1 text-slate-600">({status.quote_currency ?? (exchangeId === 'upbit' ? 'KRW' : 'USDT')})</span>
+            </p>
             {balanceEdit ? (
               <div className="flex items-center gap-1 mt-0.5">
                 <input
                   type="number"
                   className="w-full bg-surface-600 text-slate-100 text-xs rounded px-1.5 py-0.5 tabular-nums"
-                  placeholder={exchangeId === 'upbit' ? 'KRW 입력' : 'USDT 입력'}
+                  placeholder={`${status.quote_currency ?? (exchangeId === 'upbit' ? 'KRW' : 'USDT')} 입력`}
                   value={balanceInput}
                   onChange={e => setBalanceInput(e.target.value)}
                   onKeyDown={e => {
@@ -1544,7 +1548,7 @@ export default function AutoTradePanel() {
             ) : (
               <div className="flex items-center gap-1 mt-0.5">
                 <p className="text-sm font-semibold tabular-nums text-slate-100">
-                  {fmtCurrency(status.balance_krw, exchangeId)}
+                  {fmtCurrency(status.balance_krw, status.quote_currency ?? exchangeId)}
                 </p>
                 <button
                   className={status.running ? 'text-slate-600 cursor-not-allowed' : 'text-slate-500 hover:text-slate-300'}
@@ -1557,13 +1561,13 @@ export default function AutoTradePanel() {
               </div>
             )}
           </div>
-          <StatCard label="총 평가" value={fmtCurrency(status.total_value_krw, exchangeId)} />
+          <StatCard label={`총 평가 (${status.quote_currency ?? (exchangeId === 'upbit' ? 'KRW' : 'USDT')})`} value={fmtCurrency(status.total_value_krw, status.quote_currency ?? exchangeId)} />
           <StatCard label="수수료" value={`${+((status.fee_rate ?? 0.0005) * 100).toFixed(3)}%`} />
           <StatCard
-            label="실현 손익 (누적)"
+            label={`실현 손익 (${status.quote_currency ?? (exchangeId === 'upbit' ? 'KRW' : 'USDT')})`}
             value={(() => {
               const pnl = tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.total_trades > 0 ? status.realized_pnl_krw : null
-              return pnl !== null ? `${pnl >= 0 ? '+' : ''}${fmtCurrency(pnl, exchangeId)}` : '—'
+              return pnl !== null ? `${pnl >= 0 ? '+' : ''}${fmtCurrency(pnl, status.quote_currency ?? exchangeId)}` : '—'
             })()}
             color={(() => {
               const pnl = tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.total_trades > 0 ? status.realized_pnl_krw : null

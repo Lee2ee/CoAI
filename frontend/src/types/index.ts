@@ -336,6 +336,7 @@ export interface AutoBotStatus {
   trade_log: AutoBotTradeLog[]
   scan_results: ScanResult[]
   last_scan_at: string | null
+  quote_currency: 'KRW' | 'USDT'
   balance_krw: number
   fee_rate: number
   total_value_krw: number
