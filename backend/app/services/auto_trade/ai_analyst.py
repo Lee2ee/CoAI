@@ -16,10 +16,23 @@ import asyncio
 import json
 import logging
 import time
+import unicodedata
 import httpx
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _clean_reason(text: str) -> str:
+    """LLM 출력에서 제어문자·비정상 유니코드를 제거해 UI 깨짐 방지."""
+    if not text:
+        return text
+    # 제어문자 제거 (탭·줄바꿈 제외)
+    cleaned = "".join(
+        c for c in text
+        if unicodedata.category(c) not in ("Cc", "Cs") or c in ("\t", "\n")
+    )
+    return cleaned.strip()
 
 _SETTINGS_FILE = Path(__file__).parent.parent.parent.parent / "ai_settings.json"
 
@@ -225,7 +238,7 @@ async def check_entry(
             "enter":           bool(data.get("enter", True)),
             "confidence":      confidence,
             "size_multiplier": 1.2 if confidence >= 90 else (1.1 if confidence >= 80 else 1.0),
-            "reason":          str(data.get("reason", "")),
+            "reason":          _clean_reason(str(data.get("reason", ""))),
         }
         _set_cache(cache_key, result)
         logger.info(
@@ -281,7 +294,7 @@ async def choose_position_style(
         style = data.get("style", global_style)
         if style not in ("scalping", "short", "mid", "long"):
             style = global_style
-        result = {"style": style, "reason": str(data.get("reason", ""))}
+        result = {"style": style, "reason": _clean_reason(str(data.get("reason", "")))}
         _set_cache(cache_key, result)
         logger.info(f"AI 포지션 스타일 {symbol}: {style} ({result['reason']})")
         return result
@@ -342,7 +355,7 @@ async def detect_regime(
             "regime":          str(data.get("regime", "ranging")),
             "style":           str(data.get("style", "short")),
             "min_score_delta": max(-10, min(10, int(data.get("min_score_delta", 0)))),
-            "reason":          str(data.get("reason", "")),
+            "reason":          _clean_reason(str(data.get("reason", ""))),
         }
         # 유효성 검증
         if result["regime"] not in ("trending", "ranging", "volatile"):
@@ -402,7 +415,7 @@ async def analyze_losses(
             "issue":           str(data.get("issue", "MARKET_CONDITION")),
             "sl_pct_delta":    max(0.0, min(2.0, float(data.get("sl_pct_delta", 0.5)))),
             "min_score_delta": max(0,   min(10,  int(data.get("min_score_delta", 5)))),
-            "reason":          str(data.get("reason", "")),
+            "reason":          _clean_reason(str(data.get("reason", ""))),
         }
         logger.info(
             f"AI 손절 분석: issue={result['issue']} "
@@ -464,7 +477,7 @@ async def check_exit(
         action = str(data.get("action", "hold"))
         if action not in ("hold", "tighten_sl", "close_now"):
             action = "hold"
-        result = {"action": action, "reason": str(data.get("reason", ""))}
+        result = {"action": action, "reason": _clean_reason(str(data.get("reason", "")))}
         _set_cache(cache_key, result)
         if action != "hold":
             logger.info(f"AI 청산 보조 {symbol}: {action} ({result['reason']})")

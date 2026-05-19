@@ -218,6 +218,7 @@ class AutoTradeBot:
             "strategy_mode": "momentum",
         }
         self._analysis_log: list[dict] = []        # AI 분석 기록 (최대 20건)
+        self._forecast_log: list[dict] = []         # 예상 수익 기록 (최대 50건)
 
         # 포트폴리오 리스크 관리
         self._portfolio_risk = PortfolioRiskManager()
@@ -439,6 +440,7 @@ class AutoTradeBot:
                 self._portfolio_risk = PortfolioRiskManager()
                 self._consecutive_losses = 0
                 self._analysis_log.clear()
+                self._forecast_log.clear()
                 logger.info("AutoTradeBot full_stop: 선물 모의 잔고·기록 초기화 완료")
             else:
                 logger.info("AutoTradeBot full_stop: 선물 포지션 전량 청산 완료")
@@ -481,6 +483,7 @@ class AutoTradeBot:
                 for k in self._strategy_performance
             }
             self._analysis_log.clear()
+            self._forecast_log.clear()
             logger.info("AutoTradeBot full_stop: 모의 잔고·기록 초기화 완료")
         else:
             logger.info("AutoTradeBot full_stop: 실거래 포지션 전량 청산 완료")
@@ -504,6 +507,15 @@ class AutoTradeBot:
         for k, v in new_settings.items():
             if k != "trading_style" and k in self.settings:
                 self.settings[k] = v
+
+        # allowed_styles 변경 시: 현재 trading_style이 미허용이면 가장 가까운 허용 스타일로 보정
+        if "allowed_styles" in new_settings:
+            allowed = self.settings.get("allowed_styles") or ["scalping", "short", "mid", "long"]
+            current = self.settings.get("trading_style", "short")
+            clamped = self._clamp_style(current, allowed)
+            if clamped != current:
+                logger.info(f"AutoBot: trading_style '{current}' 미허용 → '{clamped}'로 자동 보정")
+                self.update_settings({"trading_style": clamped})
 
         # 봇 실행 중이면 스캔 주기를 즉시 재적용 (기존 포지션 SL/TP는 유지)
         if self._running and self._scheduler.running:
@@ -1618,7 +1630,9 @@ class AutoTradeBot:
                             signals=candidate.get("signals", []),
                             global_style=style,
                         )
-                        position_style = style_result["style"]
+                        # AI 결과도 allowed_styles 필터 적용
+                        allowed = self.settings.get("allowed_styles") or ["scalping", "short", "mid", "long"]
+                        position_style = self._clamp_style(style_result["style"], allowed)
 
                 await self._open_position(symbol, candidate, size_multiplier=size_multiplier, position_style=position_style)
                 if is_opportunistic:
@@ -1727,23 +1741,24 @@ class AutoTradeBot:
         signals = candidate.get("signals", [])
         score   = candidate.get("score", 0)
         global_style = self.settings.get("trading_style", "short")
+        allowed = self.settings.get("allowed_styles") or ["scalping", "short", "mid", "long"]
 
         # 과열/과매도 → scalping (단기 반전 狙い)
         if rsi > 75 or rsi < 28:
-            return "scalping"
+            return self._clamp_style("scalping", allowed)
 
         # 강한 모멘텀 복합 신호 + 높은 점수 → mid (추세 추종)
         strong_kw = ("MACD 골든크로스", "거래량 급증", "골든크로스", "강한 상승추세")
         strong_count = sum(1 for s in signals if any(kw in s for kw in strong_kw))
         if strong_count >= 2 and score >= 70:
-            return "mid"
+            return self._clamp_style("mid", allowed)
 
         # 단일 강신호 + 괜찮은 점수 → short (기본 단타)
         if strong_count >= 1 and score >= 60:
-            return "short"
+            return self._clamp_style("short", allowed)
 
         # 약한 신호 → 글로벌 스타일 유지
-        return global_style
+        return self._clamp_style(global_style, allowed)
 
     # ── 최초 진입 ────────────────────────────────────────────────────────────
 
@@ -1850,8 +1865,118 @@ class AutoTradeBot:
                 "total_fee_krw": entry_order.get("fee", 0),
             }
             logger.info(f"AutoBot: 진입 {symbol} @ {price:,.0f} ₩  수량={amount:.6f}  점수={scan_result.get('score',0)}")
+
+            # 예상 수익 분석 로그
+            try:
+                recent = self._trade_log[:20]
+                if len(recent) >= 5:
+                    wins = [t for t in recent if t.get("pnl_pct", 0) > 0]
+                    wr = len(wins) / len(recent)
+                    wr_basis = len(recent)
+                else:
+                    wr = 0.5
+                    wr_basis = 0  # 기본값 사용 중
+
+                # 실제 trades/day: exit_at 타임스탬프로 계산
+                actual_tpd: float | None = None
+                try:
+                    times = sorted([
+                        datetime.fromisoformat(t["exit_at"]).replace(tzinfo=None)
+                        for t in recent if "exit_at" in t
+                    ])
+                    if len(times) >= 2:
+                        span_days = (times[-1] - times[0]).total_seconds() / 86400
+                        if span_days >= 0.5:
+                            actual_tpd = (len(times) - 1) / span_days
+                except Exception:
+                    pass
+
+                fc = self._calc_return_forecast(
+                    tp_pct, sl_pct, wr, pos_style,
+                    fee_rate=self._broker.fee_rate,
+                    trades_per_day=actual_tpd,
+                )
+                forecast_log = {
+                    "at":             datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+                    "type":           "entry_forecast",
+                    "symbol":         symbol,
+                    "tp_pct":         round(tp_pct, 2),
+                    "sl_pct":         round(sl_pct, 2),
+                    "win_rate":       round(wr * 100, 1),
+                    "win_rate_basis": wr_basis,
+                    "fee_pct":        fc["fee_pct"],
+                    "ev_per_trade":   fc["ev_per_trade"],
+                    "position_style": pos_style,
+                    "forecast":       {"1d": fc["1d"], "1w": fc["1w"], "1m": fc["1m"], "1y": fc["1y"]},
+                }
+                self._forecast_log.insert(0, forecast_log)
+                if len(self._forecast_log) > 50:
+                    self._forecast_log.pop()
+            except Exception:
+                pass
+
         except Exception as e:
             logger.error(f"AutoBot: 진입 실패 {symbol}: {e}")
+
+    # ── 스타일 유틸 ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _clamp_style(style: str, allowed: list) -> str:
+        """style이 allowed에 없으면 인접한 가장 가까운 허용 스타일 반환."""
+        if style in allowed:
+            return style
+        _order = ["scalping", "short", "mid", "long"]
+        idx = _order.index(style) if style in _order else 1
+        for off in range(1, len(_order)):
+            for cand in (
+                _order[idx - off] if idx - off >= 0 else None,
+                _order[idx + off] if idx + off < len(_order) else None,
+            ):
+                if cand and cand in allowed:
+                    return cand
+        return allowed[0] if allowed else style
+
+    # ── 예상 수익 추정 ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _calc_return_forecast(
+        tp_pct: float,
+        sl_pct: float,
+        win_rate: float,
+        position_style: str,
+        fee_rate: float = 0.0005,
+        trades_per_day: float | None = None,
+        leverage: int = 1,
+    ) -> dict:
+        """
+        TP/SL/승률/수수료/레버리지 기반 선형 수익 추정 (1d/1w/1m/1y).
+
+        - leverage > 1 (선물): TP·SL·수수료 모두 증거금 기준으로 환산
+        - 수수료: fee_rate × 2 × leverage (진입+청산 왕복, 증거금 기준)
+        - 투영 방식: 단순 선형 (복리 미적용 — 현실적 보수치)
+        - trades_per_day: None이면 스타일별 보수적 기본값 사용
+        """
+        fee_pct = fee_rate * 2 * 100 * leverage   # 증거금 기준 왕복 수수료(%)
+        eff_tp  = tp_pct * leverage                # 증거금 기준 TP(%)
+        eff_sl  = sl_pct * leverage                # 증거금 기준 SL(%)
+        ev_pct  = (win_rate * eff_tp) - ((1 - win_rate) * eff_sl) - fee_pct
+
+        if trades_per_day is None or trades_per_day <= 0:
+            trades_per_day = {"scalping": 3.0, "short": 1.5, "mid": 0.5, "long": 0.2}.get(position_style, 1.0)
+
+        d = ev_pct * trades_per_day
+
+        def cap(v: float) -> float:
+            return max(-999.9, min(9999.9, round(v, 1)))
+
+        return {
+            "ev_per_trade": round(ev_pct, 2),
+            "fee_pct":      round(fee_pct, 2),
+            "1d": cap(d),
+            "1w": cap(d * 7),
+            "1m": cap(d * 30),
+            "1y": cap(d * 365),
+        }
 
     # ── 자율 판단: 물타기 / 추매 / 피라미딩 ─────────────────────────────────
 
@@ -2371,6 +2496,57 @@ class AutoTradeBot:
             f"증거금={usdt_amount:.2f}  레버리지={leverage}x  점수={scan_result['score']}"
         )
 
+        # 예상 수익 분석 로그
+        try:
+            recent = self._trade_log[:20]
+            if len(recent) >= 5:
+                wins = [t for t in recent if t.get("pnl_pct", 0) > 0]
+                wr = len(wins) / len(recent)
+                wr_basis = len(recent)
+            else:
+                wr = 0.5
+                wr_basis = 0
+
+            actual_tpd: float | None = None
+            try:
+                times = sorted([
+                    datetime.fromisoformat(t["exit_at"]).replace(tzinfo=None)
+                    for t in recent if "exit_at" in t
+                ])
+                if len(times) >= 2:
+                    span_days = (times[-1] - times[0]).total_seconds() / 86400
+                    if span_days >= 0.5:
+                        actual_tpd = (len(times) - 1) / span_days
+            except Exception:
+                pass
+
+            pos_style = self.settings.get("trading_style", "short")
+            fc = self._calc_return_forecast(
+                tp_pct, sl_pct, wr, pos_style,
+                fee_rate=FUTURES_FEE_RATE,
+                trades_per_day=actual_tpd,
+                leverage=leverage,
+            )
+            forecast_log = {
+                "at":             datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+                "type":           "entry_forecast",
+                "symbol":         symbol,
+                "tp_pct":         round(tp_pct, 2),
+                "sl_pct":         round(sl_pct, 2),
+                "win_rate":       round(wr * 100, 1),
+                "win_rate_basis": wr_basis,
+                "fee_pct":        fc["fee_pct"],
+                "ev_per_trade":   fc["ev_per_trade"],
+                "position_style": pos_style,
+                "leverage":       leverage,
+                "forecast":       {"1d": fc["1d"], "1w": fc["1w"], "1m": fc["1m"], "1y": fc["1y"]},
+            }
+            self._forecast_log.insert(0, forecast_log)
+            if len(self._forecast_log) > 50:
+                self._forecast_log.pop()
+        except Exception:
+            pass
+
     async def _close_futures_position(self, symbol: str, price: float, reason: str):
         """선물 포지션 청산."""
         pos = self._futures_positions.pop(symbol, None)
@@ -2739,6 +2915,7 @@ class AutoTradeBot:
             "ai_regime":          self._current_regime,
             "ai_consecutive_losses": self._consecutive_losses,
             "ai_analysis_log":    self._analysis_log[:10],
+            "forecast_log":       self._forecast_log[:50],
             # 성과 지표 (Sharpe / Sortino / MDD / Expectancy 등)
             "performance":        performance,
             # 포트폴리오 리스크 현황
@@ -2800,6 +2977,7 @@ class AutoTradeBot:
             "ai_regime":          self._current_regime,
             "ai_consecutive_losses": self._consecutive_losses,
             "ai_analysis_log":    self._analysis_log[:10],
+            "forecast_log":       self._forecast_log[:50],
             "performance":        performance,
             "daily_pnl_krw":      round(self._portfolio_risk.daily_pnl_krw, 4),
             # 선물 전용 추가 정보

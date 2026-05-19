@@ -1218,7 +1218,7 @@ export default function AutoTradePanel() {
   const qc = useQueryClient()
   const [showSettings, setShowSettings] = useState(false)
   const [selectedPos, setSelectedPos] = useState<AutoBotPosition | null>(null)
-  const [tab, setTab] = useState<'positions' | 'scan' | 'log' | 'ai' | 'perf'>('positions')
+  const [tab, setTab] = useState<'positions' | 'scan' | 'log' | 'ai' | 'forecast' | 'perf'>('positions')
   const [showLiveModal, setShowLiveModal] = useState(false)
   const [confirmDialog, setConfirmDialog] = useState<{
     message: string
@@ -1658,6 +1658,7 @@ export default function AutoTradePanel() {
             ['scan', `스캔 결과 (${status.scan_results.length})`],
             ['log', `거래 내역 (${tradeStats?.total ?? status.total_trades})`],
             ['ai', `AI 활동 (${status.ai_analysis_log?.length ?? 0})`],
+            ['forecast', `예상 수익 (${status.forecast_log?.length ?? 0})`],
             ['perf', '성과 분석'],
           ] as const).map(([key, label]) => (
             <button
@@ -1731,6 +1732,10 @@ export default function AutoTradePanel() {
           />
         )}
 
+        {tab === 'forecast' && (
+          <ForecastTab log={status.forecast_log ?? []} />
+        )}
+
         {tab === 'perf' && (
           <PerformancePanel
             perf={status.performance ?? {
@@ -1751,42 +1756,72 @@ export default function AutoTradePanel() {
             {/* 실현 손익 요약 */}
             {((tradeStats && tradeStats.total > 0) || status.total_trades > 0) && (
               <div className={clsx(
-                'rounded-lg px-4 py-3 border flex flex-wrap gap-4 text-xs mb-2',
+                'rounded-lg border text-xs mb-2 overflow-hidden',
                 (tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.realized_pnl_krw) >= 0
-                  ? 'bg-up/5 border-up/20' : 'bg-down/5 border-down/20'
+                  ? 'border-up/20' : 'border-down/20'
               )}>
-                <div>
-                  <p className="text-slate-500 mb-0.5">누적 실현 손익{!(tradeStats && tradeStats.total > 0) && ' (세션)'}</p>
-                  {(() => {
-                    const pnl = tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.realized_pnl_krw
-                    const initial = status.total_value_krw - status.realized_pnl_krw - status.unrealized_pnl_krw
-                    const pct = initial > 0 ? pnl / initial * 100 : null
-                    const pos = pnl >= 0
-                    return (
-                      <div className="flex items-baseline gap-1.5">
-                        <p className={clsx('text-base font-bold tabular-nums', pos ? 'text-up' : 'text-down')}>
-                          {pos ? '+' : ''}{fmtCurrency(pnl, exchangeId)}
-                        </p>
-                        {pct !== null && (
-                          <span className={clsx('text-xs font-semibold tabular-nums', pos ? 'text-up/70' : 'text-down/70')}>
-                            ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)
-                          </span>
-                        )}
+                {/* 윗줄: 손익 합산 3분할 */}
+                {(() => {
+                  const trades = dbTrades && dbTrades.length > 0 ? dbTrades : status.trade_log
+                  const pnl = tradeStats && tradeStats.total > 0 ? tradeStats.total_pnl_krw : status.realized_pnl_krw
+                  const initial = status.total_value_krw - status.realized_pnl_krw - status.unrealized_pnl_krw
+                  const pct = initial > 0 ? pnl / initial * 100 : null
+                  const profitSum = trades.filter(t => t.pnl_krw > 0).reduce((s, t) => s + t.pnl_krw, 0)
+                  const lossSum   = trades.filter(t => t.pnl_krw < 0).reduce((s, t) => s + t.pnl_krw, 0)
+                  const netPos = pnl >= 0
+                  return (
+                    <div className="grid grid-cols-3 divide-x divide-surface-700">
+                      <div className="px-4 py-3 bg-up/5">
+                        <p className="text-slate-500 mb-1">+수익 합계</p>
+                        <p className="text-up font-bold tabular-nums text-sm">+{fmtCurrency(profitSum, exchangeId)}</p>
                       </div>
-                    )
-                  })()}
-                </div>
-                <div><p className="text-slate-500 mb-0.5">총 거래</p><p className="text-slate-200 font-semibold">{tradeStats?.total ?? status.total_trades}건</p></div>
-                {tradeStats && tradeStats.total > 0 && <>
-                  <div><p className="text-slate-500 mb-0.5">승률</p><p className="text-slate-200 font-semibold">{tradeStats.win_rate}%</p></div>
-                  <div><p className="text-slate-500 mb-0.5">평균 손익</p>
-                    <p className={clsx('font-semibold', tradeStats.avg_pnl_pct >= 0 ? 'text-up' : 'text-down')}>
-                      {tradeStats.avg_pnl_pct >= 0 ? '+' : ''}{tradeStats.avg_pnl_pct.toFixed(2)}%
-                    </p>
+                      <div className="px-4 py-3 bg-down/5">
+                        <p className="text-slate-500 mb-1">-손해 합계</p>
+                        <p className="text-down font-bold tabular-nums text-sm">{fmtCurrency(lossSum, exchangeId)}</p>
+                      </div>
+                      <div className="px-4 py-3">
+                        <p className="text-slate-500 mb-1">합계{!(tradeStats && tradeStats.total > 0) && ' (세션)'}</p>
+                        <div className="flex items-baseline gap-1">
+                          <p className={clsx('font-bold tabular-nums text-sm', netPos ? 'text-up' : 'text-down')}>
+                            {netPos ? '+' : ''}{fmtCurrency(pnl, exchangeId)}
+                          </p>
+                          {pct !== null && (
+                            <span className={clsx('tabular-nums', netPos ? 'text-up/70' : 'text-down/70')}>
+                              ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })()}
+                {/* 아랫줄: 통계 지표 */}
+                <div className="flex flex-wrap gap-x-6 gap-y-1 px-4 py-2.5 border-t border-surface-700 bg-surface-800/40">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-slate-500">총 거래</span>
+                    <span className="text-slate-200 font-semibold">{tradeStats?.total ?? status.total_trades}건</span>
                   </div>
-                  <div><p className="text-slate-500 mb-0.5">최고</p><p className="text-up font-semibold">+{tradeStats.best_trade_pct.toFixed(2)}%</p></div>
-                  <div><p className="text-slate-500 mb-0.5">최저</p><p className="text-down font-semibold">{tradeStats.worst_trade_pct.toFixed(2)}%</p></div>
-                </>}
+                  {tradeStats && tradeStats.total > 0 && <>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-500">승률</span>
+                      <span className="text-slate-200 font-semibold">{tradeStats.win_rate}%</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-500">평균 손익</span>
+                      <span className={clsx('font-semibold', tradeStats.avg_pnl_pct >= 0 ? 'text-up' : 'text-down')}>
+                        {tradeStats.avg_pnl_pct >= 0 ? '+' : ''}{tradeStats.avg_pnl_pct.toFixed(2)}%
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-500">최고</span>
+                      <span className="text-up font-semibold">+{tradeStats.best_trade_pct.toFixed(2)}%</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-500">최저</span>
+                      <span className="text-down font-semibold">{tradeStats.worst_trade_pct.toFixed(2)}%</span>
+                    </div>
+                  </>}
+                </div>
               </div>
             )}
             {(() => {
@@ -1991,6 +2026,63 @@ function AiLogEntry({ entry }: { entry: AiAnalysisLogEntry }) {
               <span className="px-1.5 py-0.5 rounded bg-surface-600 text-slate-300">5m</span>
             </div>
             <p className="text-slate-400 mt-1">5m 병렬 스캔 · scalping 스타일</p>
+          </div>
+          <span className="text-slate-600 flex-shrink-0">{entry.at}</span>
+        </div>
+      </div>
+    )
+  }
+
+  if (type === 'entry_forecast') {
+    const fc = entry.forecast
+    const ev = entry.ev_per_trade ?? 0
+    const fmtPct = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`
+    const periods: [string, '1d' | '1w' | '1m' | '1y'][] = [['1일', '1d'], ['1주', '1w'], ['1달', '1m'], ['1년', '1y']]
+    return (
+      <div className="py-3 border-b border-surface-700 last:border-0 text-xs space-y-2">
+        <div className="flex items-start gap-2">
+          <TrendingUp size={14} className="mt-0.5 flex-shrink-0 text-brand-400" />
+          <div className="flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-medium text-slate-200">예상 수익 분석</span>
+              <span className="text-slate-300 font-mono">{entry.symbol}</span>
+              <span className="px-1.5 py-0.5 rounded bg-surface-600 text-slate-400">
+                TP +{entry.tp_pct}% / SL -{entry.sl_pct}%
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-surface-600 text-slate-400">
+                승률 {entry.win_rate}%
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 mt-1 text-slate-400">
+              <span>거래당 기대값</span>
+              <span className={clsx('font-semibold', ev >= 0 ? 'text-up' : 'text-down')}>{fmtPct(ev)}</span>
+              {entry.leverage && entry.leverage > 1 && (
+                <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-semibold">{entry.leverage}x</span>
+              )}
+              {entry.fee_pct !== undefined && (
+                <span className="text-slate-600">수수료 -{entry.fee_pct}% 포함</span>
+              )}
+              {entry.position_style && (
+                <span className="text-slate-600">· {entry.position_style}</span>
+              )}
+            </div>
+            {fc && (
+              <div className="grid grid-cols-4 gap-1 mt-2">
+                {periods.map(([label, key]) => {
+                  const val = fc[key]
+                  const isMax = val >= 9999
+                  return (
+                    <div key={label} className="bg-surface-800 rounded px-2 py-1.5 text-center">
+                      <div className="text-slate-500 text-[10px] mb-0.5">{label}</div>
+                      <div className={clsx('font-semibold text-[11px]', val >= 0 ? 'text-up' : 'text-down')}>
+                        {isMax ? '—' : fmtPct(val)}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+            <p className="text-slate-600 text-[10px] mt-1.5">* 수수료 포함·선형 추정. 실제 수익을 보장하지 않습니다.</p>
           </div>
           <span className="text-slate-600 flex-shrink-0">{entry.at}</span>
         </div>
@@ -2243,6 +2335,125 @@ function AiActivityLog({
           {log.map((entry, i) => <AiLogEntry key={i} entry={entry} />)}
         </div>
       )}
+    </div>
+  )
+}
+
+function ForecastTab({ log }: { log: AiAnalysisLogEntry[] }) {
+  if (log.length === 0) {
+    return (
+      <div className="py-8 text-center text-sm text-slate-500">
+        <TrendingUp size={24} className="mx-auto mb-2 text-slate-600" />
+        <p>아직 예상 수익 데이터가 없습니다.</p>
+        <p className="text-xs mt-1 text-slate-600">봇이 포지션에 진입하면 자동으로 기록됩니다.</p>
+      </div>
+    )
+  }
+
+  const fmtPct = (v: number, isMax: boolean) => isMax ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`
+  const periods: ('1d' | '1w' | '1m' | '1y')[] = ['1d', '1w', '1m', '1y']
+
+  const colHeaders: { key: string; label: string; tooltip: string }[] = [
+    {
+      key: 'ev',
+      label: '거래 EV',
+      tooltip: '거래 1건당 기대 수익률.\n(승률 × TP%) − (패률 × SL%) − 수수료\n양수면 장기적으로 수익, 음수면 손실 구조.',
+    },
+    {
+      key: '1d',
+      label: '1일 예상',
+      tooltip: '하루 동안 예상되는 누적 수익률.\n거래 EV × 하루 예상 거래 횟수 (선형 추정).',
+    },
+    {
+      key: '1w',
+      label: '1주 예상',
+      tooltip: '1주일(7일) 동안 예상되는 누적 수익률.\n거래 EV × 주간 예상 거래 횟수 (선형 추정).',
+    },
+    {
+      key: '1m',
+      label: '1달 예상',
+      tooltip: '1달(30일) 동안 예상되는 누적 수익률.\n거래 EV × 월간 예상 거래 횟수 (선형 추정).',
+    },
+    {
+      key: '1y',
+      label: '1년 예상',
+      tooltip: '1년(365일) 동안 예상되는 누적 수익률.\n거래 EV × 연간 예상 거래 횟수 (선형 추정).\n단순 참고치로 실제와 큰 차이가 날 수 있습니다.',
+    },
+    {
+      key: 'wr',
+      label: '승률',
+      tooltip: '최근 거래 이력 기반 실제 승률.\n거래 이력이 5건 미만이면 기본값 50% 적용.',
+    },
+  ]
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-slate-500">* 수수료 포함·선형 추정치. 복리 미적용. 실제 수익을 보장하지 않습니다.</p>
+
+      {/* 헤더 */}
+      <div className="grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto] gap-x-3 text-[10px] text-slate-500 px-3 py-1">
+        <span>종목 / 진입 시각</span>
+        {colHeaders.map(h => (
+          <Tooltip key={h.key} text={h.tooltip}>
+            <span className="text-right cursor-help underline decoration-dotted decoration-slate-600">{h.label}</span>
+          </Tooltip>
+        ))}
+      </div>
+
+      <div className="divide-y divide-surface-700">
+        {log.map((entry, i) => {
+          const fc = entry.forecast
+          const ev = entry.ev_per_trade ?? 0
+          const evPos = ev >= 0
+          const isDefaultWr = !entry.win_rate_basis || entry.win_rate_basis === 0
+          return (
+            <div key={i} className="grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto] gap-x-3 items-center px-3 py-2.5 text-xs hover:bg-surface-700/40 transition-colors">
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-slate-200 font-medium">{entry.symbol}</span>
+                  {entry.position_style && (
+                    <span className="px-1 rounded bg-surface-600 text-slate-400 text-[10px]">{entry.position_style}</span>
+                  )}
+                  {entry.leverage && entry.leverage > 1 && (
+                    <span className="px-1 rounded bg-amber-500/20 text-amber-300 font-semibold text-[10px]">{entry.leverage}x</span>
+                  )}
+                </div>
+                <div className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-1.5">
+                  <span>{entry.at}</span>
+                  <span className="text-slate-600">TP+{entry.tp_pct}% / SL-{entry.sl_pct}%</span>
+                  {entry.fee_pct !== undefined && (
+                    <span className="text-slate-600">수수료 {entry.fee_pct}%</span>
+                  )}
+                </div>
+              </div>
+
+              {/* 거래 EV */}
+              <span className={clsx('text-right tabular-nums font-semibold', evPos ? 'text-up' : 'text-down')}>
+                {evPos ? '+' : ''}{ev.toFixed(2)}%
+              </span>
+
+              {/* 1일~1년 */}
+              {fc ? periods.map(p => {
+                const val = fc[p]
+                const isMax = val >= 9999
+                return (
+                  <span key={p} className={clsx('text-right tabular-nums font-semibold', isMax ? 'text-slate-500' : val >= 0 ? 'text-up' : 'text-down')}>
+                    {fmtPct(val, isMax)}
+                  </span>
+                )
+              }) : periods.map(p => <span key={p} className="text-right text-slate-600">—</span>)}
+
+              {/* 승률 */}
+              <Tooltip text={isDefaultWr ? '거래 이력 5건 미만 — 기본값 50% 적용 중입니다.\n실거래가 쌓이면 실제 승률로 업데이트됩니다.' : `최근 ${entry.win_rate_basis}건 거래 기반 실제 승률`}>
+                <span className={clsx('text-right tabular-nums cursor-help', isDefaultWr ? 'text-slate-500' : 'text-slate-300')}>
+                  {entry.win_rate}%
+                  {isDefaultWr && <span className="text-slate-600 text-[9px] ml-0.5">(기본)</span>}
+                </span>
+              </Tooltip>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }

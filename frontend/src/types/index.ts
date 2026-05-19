@@ -283,7 +283,7 @@ export interface FuturesPosition {
 
 export interface AiAnalysisLogEntry {
   at: string
-  type: 'regime_change' | 'loss_analysis' | 'entry_blocked' | 'exit_action' | 'surge_override' | 'performance_feedback' | 'opportunistic_entry' | 'scalping_parallel'
+  type: 'regime_change' | 'loss_analysis' | 'entry_blocked' | 'exit_action' | 'surge_override' | 'performance_feedback' | 'opportunistic_entry' | 'scalping_parallel' | 'entry_forecast'
   regime?: string
   style?: string
   reason?: string
@@ -297,6 +297,16 @@ export interface AiAnalysisLogEntry {
   volume_ratio?: number
   price_change_pct?: number
   score?: number
+  // entry_forecast 전용
+  tp_pct?: number
+  sl_pct?: number
+  win_rate?: number
+  win_rate_basis?: number
+  fee_pct?: number
+  ev_per_trade?: number
+  position_style?: string
+  leverage?: number
+  forecast?: { '1d': number; '1w': number; '1m': number; '1y': number }
 }
 
 export interface StylePreset {
@@ -346,6 +356,7 @@ export interface AutoBotStatus {
   }
   ai_consecutive_losses: number
   ai_analysis_log: AiAnalysisLogEntry[]
+  forecast_log: AiAnalysisLogEntry[]
   performance: PerformanceStats
   daily_pnl_krw: number
   // 선물 전용
