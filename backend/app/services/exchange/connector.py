@@ -253,7 +253,10 @@ class ExchangeConnector:
         return await self._exchange.cancel_order(order_id, symbol)
 
     async def close(self):
+        session = getattr(self._exchange, "session", None)
         await self._exchange.close()
+        if session is not None and not session.closed:
+            await session.close()
 
 
 class PaperBroker:
@@ -437,7 +440,10 @@ class BinanceFuturesConnector:
         }
 
     async def close(self):
+        session = getattr(self._exchange, "session", None)
         await self._exchange.close()
+        if session is not None and not session.closed:
+            await session.close()
 
 
 class FuturesPaperBroker:
@@ -544,9 +550,14 @@ class FuturesPaperBroker:
             return
         entry     = pos["entry_price"]
         contracts = pos["contracts"]
-        pos["unrealized_pnl"] = (
+        raw_pnl = (
             (mark_price - entry) * contracts if pos["side"] == "long"
             else (entry - mark_price) * contracts
+        )
+        # close_position 과 동일하게 왕복 수수료·펀딩비 차감
+        est_exit_fee = contracts * mark_price * self.fee_rate
+        pos["unrealized_pnl"] = (
+            raw_pnl - pos.get("entry_fee", 0) - est_exit_fee - pos.get("funding_paid", 0)
         )
 
     def apply_funding(self, symbol: str, funding_rate: float):
