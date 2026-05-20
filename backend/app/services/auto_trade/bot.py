@@ -615,13 +615,11 @@ class AutoTradeBot:
         side  = pos["side"]
         entry = pos["entry_price"]
 
-        # 고점/저점 갱신
-        if side == "long":
-            if price > pos.get("highest_price", entry):
-                pos["highest_price"] = price
-        else:
-            if price < pos.get("lowest_price", entry):
-                pos["lowest_price"] = price
+        # 고점/저점 갱신 (양방향: 트레일링 기준 + 폴링 사이 SL 돌파 감지)
+        if price > pos.get("highest_price", entry):
+            pos["highest_price"] = price
+        if price < pos.get("lowest_price", entry):
+            pos["lowest_price"] = price
 
         # 현재 미실현 손익률 (레버리지 반영) 및 가격 기준 수익률
         invested = pos.get("initial_margin", 1.0)
@@ -650,6 +648,7 @@ class AutoTradeBot:
                     trail_sl = pos.get("highest_price", price) * (1 - t_pct / 100)
                     if trail_sl > pos["stop_loss_price"]:
                         pos["stop_loss_price"] = trail_sl
+                        pos["lowest_price"] = price  # SL 상향 후 저점 기준 초기화
                     if price <= pos["stop_loss_price"]:
                         await self._close_futures_position(symbol, price, "trailing_stop")
                         return
@@ -657,6 +656,7 @@ class AutoTradeBot:
                     trail_sl = pos.get("lowest_price", price) * (1 + t_pct / 100)
                     if trail_sl < pos["stop_loss_price"]:
                         pos["stop_loss_price"] = trail_sl
+                        pos["highest_price"] = price  # SL 하향 후 고점 기준 초기화
                     if price >= pos["stop_loss_price"]:
                         await self._close_futures_position(symbol, price, "trailing_stop")
                         return
@@ -667,25 +667,27 @@ class AutoTradeBot:
                 and not pos.get("breakeven_set")):
             if side == "long" and pos["stop_loss_price"] < entry:
                 pos["stop_loss_price"] = entry
+                pos["lowest_price"] = price  # SL 상향 후 저점 기준 초기화
                 pos["breakeven_set"] = True
                 logger.info(f"AutoBot 선물 손익분기 SL 이동 {symbol} ({side}): SL → {entry:.4f}")
             elif side == "short" and pos["stop_loss_price"] > entry:
                 pos["stop_loss_price"] = entry
+                pos["highest_price"] = price  # SL 하향 후 고점 기준 초기화
                 pos["breakeven_set"] = True
                 logger.info(f"AutoBot 선물 손익분기 SL 이동 {symbol} ({side}): SL → {entry:.4f}")
 
-        # ── SL/TP 체크 ────────────────────────────────────────────────────────
+        # ── SL/TP 체크 (lowest/highest로 폴링 사이 SL 돌파도 감지) ────────────
         sl = pos["stop_loss_price"]
         tp = pos["take_profit_price"]
         if side == "long":
-            if price <= sl:
+            if min(price, pos.get("lowest_price", price)) <= sl:
                 await self._close_futures_position(symbol, price, "stop_loss")
                 return
             if price >= tp:
                 await self._close_futures_position(symbol, price, "take_profit")
                 return
         else:
-            if price >= sl:
+            if max(price, pos.get("highest_price", price)) >= sl:
                 await self._close_futures_position(symbol, price, "stop_loss")
                 return
             if price <= tp:
@@ -2803,13 +2805,11 @@ class AutoTradeBot:
             side  = pos["side"]
             entry = pos["entry_price"]
 
-            # 고점/저점 갱신
-            if side == "long":
-                if price > pos.get("highest_price", entry):
-                    pos["highest_price"] = price
-            else:
-                if price < pos.get("lowest_price", entry):
-                    pos["lowest_price"] = price
+            # 고점/저점 갱신 (양방향: 트레일링 기준 + 폴링 사이 SL 돌파 감지)
+            if price > pos.get("highest_price", entry):
+                pos["highest_price"] = price
+            if price < pos.get("lowest_price", entry):
+                pos["lowest_price"] = price
 
             pnl_pct   = pos.get("unrealized_pnl_pct", 0.0)
             tp_pct    = abs(pos["take_profit_price"] - entry) / entry * 100 if not pos.get("trailing_active") else self.settings.get("take_profit_pct", 3.0)
@@ -2833,10 +2833,12 @@ class AutoTradeBot:
                         trail_sl = pos.get("highest_price", price) * (1 - t_pct / 100)
                         if trail_sl > pos["stop_loss_price"]:
                             pos["stop_loss_price"] = trail_sl
+                            pos["lowest_price"] = price  # SL 상향 후 저점 기준 초기화
                     else:
                         trail_sl = pos.get("lowest_price", price) * (1 + t_pct / 100)
                         if trail_sl < pos["stop_loss_price"]:
                             pos["stop_loss_price"] = trail_sl
+                            pos["highest_price"] = price  # SL 하향 후 고점 기준 초기화
 
             # ── 손익분기 SL 이동: 가격이 TP의 40% 이상 진행 → SL → 진입가 ──
             if (price_gain_pct >= tp_pct * 0.4
@@ -2844,26 +2846,28 @@ class AutoTradeBot:
                     and not pos.get("breakeven_set")):
                 if side == "long" and pos["stop_loss_price"] < entry:
                     pos["stop_loss_price"] = entry
+                    pos["lowest_price"] = price  # SL 상향 후 저점 기준 초기화
                     pos["breakeven_set"] = True
                     logger.info(f"AutoBot 선물 손익분기 SL {symbol} ({side}): SL → {entry:.4f}")
                 elif side == "short" and pos["stop_loss_price"] > entry:
                     pos["stop_loss_price"] = entry
+                    pos["highest_price"] = price  # SL 하향 후 고점 기준 초기화
                     pos["breakeven_set"] = True
                     logger.info(f"AutoBot 선물 손익분기 SL {symbol} ({side}): SL → {entry:.4f}")
 
             sl = pos["stop_loss_price"]
             tp = pos["take_profit_price"]
 
-            # SL/TP 체크
+            # SL/TP 체크 (lowest/highest로 폴링 사이 SL 돌파도 감지)
             if side == "long":
-                if price <= sl:
+                if min(price, pos.get("lowest_price", price)) <= sl:
                     await self._close_futures_position(symbol, price, "stop_loss")
                     continue
                 if price >= tp:
                     await self._close_futures_position(symbol, price, "take_profit")
                     continue
             else:  # short
-                if price >= sl:
+                if max(price, pos.get("highest_price", price)) >= sl:
                     await self._close_futures_position(symbol, price, "stop_loss")
                     continue
                 if price <= tp:
