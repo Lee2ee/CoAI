@@ -382,17 +382,20 @@ class AutoTradeBot:
                 self._scheduler.remove_job("auto_bot_cycle")
         except Exception:
             pass
-        # 선물 커넥터 정리
-        if self._futures_connector:
+        # 커넥터 정리 (aiohttp 세션 누수 방지)
+        for conn in (self._connector, self._futures_connector):
+            if conn is None:
+                continue
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    loop.create_task(self._futures_connector.close())
+                    loop.create_task(conn.close())
                 else:
-                    loop.run_until_complete(self._futures_connector.close())
+                    loop.run_until_complete(conn.close())
             except Exception:
                 pass
-            self._futures_connector = None
+        self._connector = None
+        self._futures_connector = None
         logger.info("AutoTradeBot stopped")
 
     def pause(self):
@@ -620,13 +623,17 @@ class AutoTradeBot:
             if price < pos.get("lowest_price", entry):
                 pos["lowest_price"] = price
 
-        # 현재 미실현 손익률 (레버리지 반영)
+        # 현재 미실현 손익률 (레버리지 반영) 및 가격 기준 수익률
         invested = pos.get("initial_margin", 1.0)
-        leverage = pos.get("leverage", 1)
         raw_pnl = (price - entry) * pos.get("contracts", 0)
         if side == "short":
             raw_pnl = -raw_pnl
         pnl_pct = raw_pnl / invested * 100 if invested > 0 else 0.0
+        # 레버리지 무관한 가격 기준 수익률 (SL/TP 비교에 사용)
+        price_gain_pct = (
+            (price - entry) / entry * 100 if side == "long"
+            else (entry - price) / entry * 100
+        )
 
         tp_pct = abs(pos["take_profit_price"] - entry) / entry * 100
 
@@ -634,10 +641,10 @@ class AutoTradeBot:
         if self.settings.get("trailing_stop"):
             t_activate = self.settings.get("trailing_activate_pct", tp_pct * 0.8)
             t_pct      = self.settings.get("trailing_pct", 2.0)
-            if not pos.get("trailing_active") and pnl_pct >= t_activate:
+            if not pos.get("trailing_active") and price_gain_pct >= t_activate:
                 pos["trailing_active"] = True
                 pos["take_profit_price"] = float("inf") if side == "long" else 0.0
-                logger.info(f"AutoBot 선물 트레일링 활성화 {symbol} ({side}) pnl={pnl_pct:+.2f}%")
+                logger.info(f"AutoBot 선물 트레일링 활성화 {symbol} ({side}) price_gain={price_gain_pct:+.2f}%")
             if pos.get("trailing_active"):
                 if side == "long":
                     trail_sl = pos.get("highest_price", price) * (1 - t_pct / 100)
@@ -654,8 +661,8 @@ class AutoTradeBot:
                         await self._close_futures_position(symbol, price, "trailing_stop")
                         return
 
-        # ── 손익분기 SL 이동: 이익이 TP의 40% 이상 → SL을 진입가로 ────────────
-        if (pnl_pct >= tp_pct * 0.4
+        # ── 손익분기 SL 이동: 가격이 TP의 40% 이상 진행 → SL을 진입가로 ─────────
+        if (price_gain_pct >= tp_pct * 0.4
                 and not pos.get("trailing_active")
                 and not pos.get("breakeven_set")):
             if side == "long" and pos["stop_loss_price"] < entry:
@@ -2743,7 +2750,7 @@ class AutoTradeBot:
             record = {
                 "symbol":       symbol,
                 "avg_price":    entry,
-                "exit_price":   price,
+                "exit_price":   round(close_order["price"], 8),  # 슬리피지 반영 실제 체결가
                 "total_amount": pos["contracts"],
                 "entries":      [{"price": entry, "amount": pos["contracts"],
                                   "at": pos["entry_at"], "type": "initial"}],
@@ -2807,15 +2814,20 @@ class AutoTradeBot:
             pnl_pct   = pos.get("unrealized_pnl_pct", 0.0)
             tp_pct    = abs(pos["take_profit_price"] - entry) / entry * 100 if not pos.get("trailing_active") else self.settings.get("take_profit_pct", 3.0)
             sl_pct_val = abs(pos["stop_loss_price"] - entry) / entry * 100
+            # 레버리지 무관한 가격 기준 수익률 (트레일링/손익분기/AI 청산 임계값 비교용)
+            price_gain_pct = (
+                (price - entry) / entry * 100 if side == "long"
+                else (entry - price) / entry * 100
+            )
 
             # ── 트레일링 스탑 ─────────────────────────────────────────────
             if self.settings.get("trailing_stop"):
                 t_activate = self.settings.get("trailing_activate_pct", tp_pct * 0.8)
                 t_pct      = self.settings.get("trailing_pct", 2.0)
-                if not pos.get("trailing_active") and pnl_pct >= t_activate:
+                if not pos.get("trailing_active") and price_gain_pct >= t_activate:
                     pos["trailing_active"] = True
                     pos["take_profit_price"] = float("inf") if side == "long" else 0.0
-                    logger.info(f"AutoBot 선물 트레일링 활성화 {symbol} ({side}) pnl={pnl_pct:+.2f}%")
+                    logger.info(f"AutoBot 선물 트레일링 활성화 {symbol} ({side}) price_gain={price_gain_pct:+.2f}%")
                 if pos.get("trailing_active"):
                     if side == "long":
                         trail_sl = pos.get("highest_price", price) * (1 - t_pct / 100)
@@ -2826,8 +2838,8 @@ class AutoTradeBot:
                         if trail_sl < pos["stop_loss_price"]:
                             pos["stop_loss_price"] = trail_sl
 
-            # ── 손익분기 SL 이동: 이익 TP의 40% 이상 → SL → 진입가 ───────
-            if (pnl_pct >= tp_pct * 0.4
+            # ── 손익분기 SL 이동: 가격이 TP의 40% 이상 진행 → SL → 진입가 ──
+            if (price_gain_pct >= tp_pct * 0.4
                     and not pos.get("trailing_active")
                     and not pos.get("breakeven_set")):
                 if side == "long" and pos["stop_loss_price"] < entry:
@@ -2859,9 +2871,9 @@ class AutoTradeBot:
                     continue
 
             # AI 청산 보조 (수익 구간에서만)
-            ai_threshold = max(sl_pct_val, tp_pct * 0.5)
+            ai_threshold = max(sl_pct_val, tp_pct * 0.5)  # price-based %
             if (
-                pnl_pct >= ai_threshold
+                price_gain_pct >= ai_threshold
                 and ai_analyst.is_ai_available()
                 and self.settings.get("ai_exit_assist", True)
             ):
@@ -2891,9 +2903,9 @@ class AutoTradeBot:
                     continue
                 elif exit_ai["action"] == "tighten_sl":
                     entry = pos["entry_price"]
-                    new_sl = (entry * (1 + (pnl_pct - ai_threshold / 2) / 100)
+                    new_sl = (entry * (1 + (price_gain_pct - ai_threshold / 2) / 100)
                               if side == "long"
-                              else entry * (1 - (pnl_pct - ai_threshold / 2) / 100))
+                              else entry * (1 - (price_gain_pct - ai_threshold / 2) / 100))
                     if ((side == "long" and new_sl > pos["stop_loss_price"]) or
                             (side == "short" and new_sl < pos["stop_loss_price"])):
                         pos["stop_loss_price"] = new_sl

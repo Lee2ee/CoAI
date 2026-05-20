@@ -15,6 +15,7 @@
 import asyncio
 import json
 import logging
+import math
 import time
 import unicodedata
 import httpx
@@ -338,8 +339,8 @@ async def detect_regime(
     if len(btc_closes) < 10:
         return {"regime": "ranging", "style": "short", "min_score_delta": 0, "reason": "데이터 부족"}
 
-    # 가격 1% 단위로 캐시 키 생성 (너무 자주 바뀌지 않도록)
-    price_bucket = int(btc_closes[-1] / (btc_closes[-1] * 0.01)) if btc_closes[-1] > 0 else 0
+    # 가격 1% 단위로 캐시 키 생성 (ln 스케일로 ~1% 변동마다 버킷 변경)
+    price_bucket = int(math.log(btc_closes[-1]) * 100) if btc_closes[-1] > 0 else 0
     cache_key = f"regime:{price_bucket}"
     cached = _get_cache(cache_key, CACHE_TTL["regime"])
     if cached:
