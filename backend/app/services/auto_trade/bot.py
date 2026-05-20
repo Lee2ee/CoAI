@@ -676,6 +676,33 @@ class AutoTradeBot:
                 pos["breakeven_set"] = True
                 logger.info(f"AutoBot 선물 손익분기 SL 이동 {symbol} ({side}): SL → {entry:.4f}")
 
+        # ── 수익 래칫: TP 진행률 60%/80% 단계로 SL 자동 상향 (trailing 미활성 구간 보호)
+        if tp_pct > 0 and not pos.get("trailing_active"):
+            tp_progress = price_gain_pct / tp_pct
+            # (threshold, 현재 수익 중 잠글 비율) — 높은 단계부터 체크
+            for threshold, lock_ratio in ((0.8, 0.6), (0.6, 0.3)):
+                if tp_progress >= threshold:
+                    gain_to_lock = price_gain_pct * lock_ratio
+                    if side == "long":
+                        new_sl = entry * (1 + gain_to_lock / 100)
+                        if new_sl > pos["stop_loss_price"]:
+                            pos["stop_loss_price"] = new_sl
+                            pos["lowest_price"] = price
+                            logger.info(
+                                f"AutoBot 선물 수익 래칫 {symbol} ({side}) "
+                                f"TP진행 {tp_progress:.0%}: SL → {new_sl:.4f}"
+                            )
+                    else:
+                        new_sl = entry * (1 - gain_to_lock / 100)
+                        if new_sl < pos["stop_loss_price"]:
+                            pos["stop_loss_price"] = new_sl
+                            pos["highest_price"] = price
+                            logger.info(
+                                f"AutoBot 선물 수익 래칫 {symbol} ({side}) "
+                                f"TP진행 {tp_progress:.0%}: SL → {new_sl:.4f}"
+                            )
+                    break
+
         # ── SL/TP 체크 (lowest/highest로 폴링 사이 SL 돌파도 감지) ────────────
         sl = pos["stop_loss_price"]
         tp = pos["take_profit_price"]
@@ -2854,6 +2881,32 @@ class AutoTradeBot:
                     pos["highest_price"] = price  # SL 하향 후 고점 기준 초기화
                     pos["breakeven_set"] = True
                     logger.info(f"AutoBot 선물 손익분기 SL {symbol} ({side}): SL → {entry:.4f}")
+
+            # ── 수익 래칫: TP 진행률 60%/80% 단계로 SL 자동 상향 (trailing 미활성 구간 보호)
+            if tp_pct > 0 and not pos.get("trailing_active"):
+                tp_progress = price_gain_pct / tp_pct
+                for threshold, lock_ratio in ((0.8, 0.6), (0.6, 0.3)):
+                    if tp_progress >= threshold:
+                        gain_to_lock = price_gain_pct * lock_ratio
+                        if side == "long":
+                            new_sl = entry * (1 + gain_to_lock / 100)
+                            if new_sl > pos["stop_loss_price"]:
+                                pos["stop_loss_price"] = new_sl
+                                pos["lowest_price"] = price
+                                logger.info(
+                                    f"AutoBot 선물 수익 래칫 {symbol} ({side}) "
+                                    f"TP진행 {tp_progress:.0%}: SL → {new_sl:.4f}"
+                                )
+                        else:
+                            new_sl = entry * (1 - gain_to_lock / 100)
+                            if new_sl < pos["stop_loss_price"]:
+                                pos["stop_loss_price"] = new_sl
+                                pos["highest_price"] = price
+                                logger.info(
+                                    f"AutoBot 선물 수익 래칫 {symbol} ({side}) "
+                                    f"TP진행 {tp_progress:.0%}: SL → {new_sl:.4f}"
+                                )
+                        break
 
             sl = pos["stop_loss_price"]
             tp = pos["take_profit_price"]
