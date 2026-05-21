@@ -2738,7 +2738,7 @@ class AutoTradeBot:
             pos_style = self.settings.get("trading_style", "short")
             fc = self._calc_return_forecast(
                 tp_pct, sl_pct, wr, pos_style,
-                fee_rate=FUTURES_FEE_RATE,
+                fee_rate=self._futures_broker.fee_rate,
                 trades_per_day=actual_tpd,
                 leverage=leverage,
             )
@@ -3312,7 +3312,7 @@ class AutoTradeBot:
             "last_scan_at": self._last_scan_at,
             "quote_currency": "USDT",
             "balance_krw": round(usdt, 4),
-            "fee_rate": FUTURES_FEE_RATE,
+            "fee_rate": self._futures_broker.fee_rate,
             "total_value_krw": round(total_value, 4),
             "unrealized_pnl_krw": round(total_unrealized, 4),
             "unrealized_pnl_pct": round(
