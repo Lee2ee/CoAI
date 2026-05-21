@@ -1216,6 +1216,7 @@ class AutoTradeBot:
                         btc_closes=btc_closes,
                         btc_rsi=btc_rsi,
                         btc_volume_ratio=btc_volume_ratio,
+                        btc_adx=btc_adx,
                     )
                     regime = ai_regime  # AI 결과 우선
                 except Exception:
@@ -1534,6 +1535,8 @@ class AutoTradeBot:
                         sl_gap_pct=sl_gap,
                         sl_pct=_sl_pct,
                         tp_pct=_tp_pct,
+                        rsi=scan.get("rsi", 50.0),
+                        macd_direction=scan.get("macd_direction", "neutral"),
                     )
                     if exit_ai["action"] == "close_now":
                         log_entry = {
@@ -1743,6 +1746,13 @@ class AutoTradeBot:
                         signals=candidate.get("signals", []),
                         rsi=candidate.get("rsi", 50.0),
                         side="long",
+                        adx=candidate.get("adx", 0.0),
+                        volume_ratio=candidate.get("volume_ratio", 1.0),
+                        price_change_pct=candidate.get("price_change_pct", 0.0),
+                        macd_direction=candidate.get("macd_direction", "neutral"),
+                        bb_pos=candidate.get("bb_pos", 0.5),
+                        atr_pct=candidate.get("atr_pct", 1.0),
+                        mtf_trend=candidate.get("mtf_trend", "neutral"),
                     )
                     # 급등 종목은 AI 블록 confidence 기준을 50으로 완화
                     ai_block_threshold = 50 if is_surge else 65
@@ -1795,6 +1805,9 @@ class AutoTradeBot:
                             rsi=candidate.get("rsi", 50.0),
                             score=candidate["score"],
                             signals=candidate.get("signals", []),
+                            adx=candidate.get("adx", 0.0),
+                            volume_ratio=candidate.get("volume_ratio", 1.0),
+                            macd_direction=candidate.get("macd_direction", "neutral"),
                             global_style=style,
                         )
                         # AI 결과도 allowed_styles 필터 적용
@@ -1871,6 +1884,13 @@ class AutoTradeBot:
                         signals=candidate.get("signals", []),
                         rsi=candidate.get("rsi", 50.0),
                         side="long",
+                        adx=candidate.get("adx", 0.0),
+                        volume_ratio=candidate.get("volume_ratio", 1.0),
+                        price_change_pct=candidate.get("price_change_pct", 0.0),
+                        macd_direction=candidate.get("macd_direction", "neutral"),
+                        bb_pos=candidate.get("bb_pos", 0.5),
+                        atr_pct=candidate.get("atr_pct", 1.0),
+                        mtf_trend=candidate.get("mtf_trend", "neutral"),
                     )
                     if not ai_result["enter"] or ai_result["confidence"] < 55:
                         logger.info(
@@ -2658,6 +2678,13 @@ class AutoTradeBot:
                 signals=scan_result.get("signals", []),
                 rsi=scan_result.get("rsi", 50.0),
                 side=side,
+                adx=scan_result.get("adx", 0.0),
+                volume_ratio=scan_result.get("volume_ratio", 1.0),
+                price_change_pct=scan_result.get("price_change_pct", 0.0),
+                macd_direction=scan_result.get("macd_direction", "neutral"),
+                bb_pos=scan_result.get("bb_pos", 0.5),
+                atr_pct=scan_result.get("atr_pct", 1.0),
+                mtf_trend=scan_result.get("mtf_trend", "neutral"),
             )
             if not ai_result["enter"] or ai_result["confidence"] < 55:
                 log_entry = {
@@ -2873,10 +2900,15 @@ class AutoTradeBot:
 
     async def _check_futures_positions(self, scan_results: list[dict]):
         """선물 포지션 SL/TP + 트레일링 + 손익분기 SL + AI 청산 보조."""
+        scan_map = {r["symbol"]: r for r in (scan_results or [])}
         for symbol, pos in list(self._futures_positions.items()):
             price = pos.get("current_price", pos["entry_price"])
             if not price or not (price > 0):
                 continue
+            # 최신 스캔 데이터로 RSI/MACD 캐시 갱신 (AI 청산 분석용)
+            if symbol in scan_map:
+                pos["last_rsi"] = scan_map[symbol].get("rsi", pos.get("last_rsi", 50.0))
+                pos["last_macd_direction"] = scan_map[symbol].get("macd_direction", pos.get("last_macd_direction", "neutral"))
 
             self._futures_broker.update_unrealized_pnl(symbol, price)
             fp = self._futures_broker.positions.get(symbol)
@@ -3001,6 +3033,8 @@ class AutoTradeBot:
                     sl_gap_pct=sl_gap,
                     sl_pct=sl_pct_val,
                     tp_pct=tp_pct,
+                    rsi=pos.get("last_rsi", 50.0),
+                    macd_direction=pos.get("last_macd_direction", "neutral"),
                 )
                 if exit_ai["action"] == "close_now":
                     log_entry = {

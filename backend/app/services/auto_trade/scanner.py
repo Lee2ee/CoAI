@@ -532,6 +532,7 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         macd_cross = False
         macd_bull = False
         macd_pts = 0
+        macd_direction = "neutral"
         if macd_df is not None and len(macd_df.dropna()) >= 2:
             cols = macd_df.columns.tolist()
             ml_now  = float(macd_df[cols[0]].iloc[-1])
@@ -542,13 +543,20 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
                 macd_pts = 30
                 signals.append("MACD 골든크로스 ↑")
                 macd_cross = True
+                macd_direction = "cross_up"
             elif ml_now > sg_now:
                 macd_pts = 15
                 signals.append("MACD 강세 구간")
                 macd_bull = True
+                macd_direction = "bullish"
             elif ml_now > ml_prev:
                 macd_pts = 5
                 signals.append("MACD 반등 중")
+                macd_direction = "recovering"
+            elif ml_now < sg_now and ml_prev >= sg_prev:
+                macd_direction = "cross_down"
+            elif ml_now < sg_now:
+                macd_direction = "bearish"
         score += int(macd_pts * weights["macd"])
 
         # ── 거래량 (기본 20점, 가중치 적용) ────────────────────────────────
@@ -662,16 +670,26 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         # ── ATR 기반 SL 하한 보정 ───────────────────────────────────────────
         # 고정 SL이 코인 변동성(ATR)보다 좁으면 정상 흔들림에 손절 발동.
         # sl_pct < 1.5 * ATR% 이면 ATR 기준으로 확대하고 TP도 2:1 R:R 유지.
+        atr_pct_val = 1.0
         try:
             atr_s = ta.atr(df["high"], df["low"], close, length=14)
             if atr_s is not None and not atr_s.empty:
-                atr_pct = float(atr_s.dropna().iloc[-1]) / current_price * 100
+                atr_pct_val = float(atr_s.dropna().iloc[-1]) / current_price * 100
+                atr_pct = atr_pct_val
                 if sl_pct is not None and sl_pct < atr_pct * 1.5:
                     sl_pct = round(atr_pct * 1.5, 2)
                     if tp_pct is not None:
                         tp_pct = max(tp_pct, round(sl_pct * 2.0, 2))
         except Exception:
             pass
+
+        # ── BB 포지션 (0=하단, 0.5=중간, 1=상단) ────────────────────────────
+        bb_pos_val = 0.5
+        if bb_mid > 0 and bb_lower > 0:
+            bb_upper_est = 2 * bb_mid - bb_lower
+            _p = float(close.iloc[-1])
+            if bb_upper_est > bb_lower:
+                bb_pos_val = round(max(0.0, min(1.0, (_p - bb_lower) / (bb_upper_est - bb_lower))), 2)
 
         # ── 멀티 타임프레임 추세 확인 (TODO: 멀티TF) ────────────────────────
         mtf_trend = "neutral"
@@ -716,6 +734,10 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
             "mr_signals":       mr_signals,
             "bb_mid":           round(bb_mid, 2),
             "bb_lower":         round(bb_lower, 2),
+            # AI 분석용 추가 지표
+            "macd_direction":   macd_direction,
+            "bb_pos":           bb_pos_val,
+            "atr_pct":          round(atr_pct_val, 2),
         }
 
     except Exception as e:
@@ -727,6 +749,7 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
             "volume_ratio": 0.0, "price_change_pct": 0.0,
             "mtf_trend": "neutral", "mtf_confirmed": True,
             "adx": 0.0, "mr_score": 0, "mr_signals": [], "bb_mid": 0.0, "bb_lower": 0.0,
+            "macd_direction": "neutral", "bb_pos": 0.5, "atr_pct": 1.0,
         }
 
 
@@ -1098,11 +1121,25 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
             if sc > 0:
                 candidates.append((strat, side, sc, sg))
 
+    # ── 선물 공통 파생 지표 ────────────────────────────────────────────────
+    _f_macd_dir = (
+        "cross_up"   if crossed_up   else
+        "cross_down" if crossed_down else
+        "bullish"    if macd_line > signal_line else
+        "bearish"
+    )
+    _f_bb_pos = (
+        round(max(0.0, min(1.0, (price_now - bb_lower) / (bb_upper - bb_lower))), 2)
+        if bb_upper > bb_lower else 0.5
+    )
+    _f_atr_pct = round(atr / price_now * 100, 2) if price_now > 0 and atr > 0 else 1.0
+
     if not candidates:
         return {**_empty, "rsi": round(rsi, 1), "adx": round(adx, 1),
                 "volume_ratio": round(vol_ratio, 2),
                 "bb_mid": round(bb_mid, 2), "bb_lower": round(bb_lower, 2),
-                "price_change_pct": round(price_change_pct, 2)}
+                "price_change_pct": round(price_change_pct, 2),
+                "macd_direction": _f_macd_dir, "bb_pos": _f_bb_pos, "atr_pct": _f_atr_pct}
 
     strategy_type, side, score, signals = max(candidates, key=lambda x: x[2])
     cfg = FUTURES_STRATEGY_STYLE_CONFIGS.get(strategy_type, {}).get(style, {})
@@ -1128,6 +1165,10 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
         "mr_signals":       [],
         "bb_mid":           round(bb_mid, 2),
         "bb_lower":         round(bb_lower, 2),
+        # AI 분석용 추가 지표
+        "macd_direction":   _f_macd_dir,
+        "bb_pos":           _f_bb_pos,
+        "atr_pct":          _f_atr_pct,
     }
 
 
