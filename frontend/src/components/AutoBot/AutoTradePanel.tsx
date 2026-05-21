@@ -1000,6 +1000,23 @@ function FuturesPositionCard({ pos, onClick, krwRate }: { pos: FuturesPosition; 
           <span className="text-xs bg-surface-600 text-slate-400 px-1.5 py-0.5 rounded">
             {pos.margin_mode === 'cross' ? 'Cross' : 'Isolated'}
           </span>
+          {pos.strategy_label && (
+            <span className={clsx(
+              'text-xs px-1.5 py-0.5 rounded font-medium',
+              STRATEGY_COLORS[pos.strategy_type] ?? STRATEGY_COLORS.standard
+            )}>
+              {pos.strategy_label}
+            </span>
+          )}
+          {pos.position_style_label && (
+            <span className={clsx(
+              'text-xs px-1.5 py-0.5 rounded font-medium border',
+              STYLE_META[pos.position_style ?? '']?.badge ?? 'bg-surface-600 text-slate-400',
+              STYLE_META[pos.position_style ?? '']?.border ?? 'border-surface-500'
+            )}>
+              {pos.position_style_label}
+            </span>
+          )}
         </div>
         <span className={clsx('text-sm font-bold tabular-nums', pnlPos ? 'text-up' : 'text-down')}>
           {pnlPos ? '+' : ''}{pos.unrealized_pnl_pct.toFixed(2)}%
@@ -1051,7 +1068,7 @@ function FuturesPositionCard({ pos, onClick, krwRate }: { pos: FuturesPosition; 
           <p className="text-up font-mono">${pos.take_profit_price.toFixed(4)}</p>
         </div>
         <div>
-          <p className="text-slate-500">청산가</p>
+          <p className="text-slate-500">강제청산가</p>
           <p className={clsx(
             'font-mono font-semibold',
             liqPct !== null && liqPct < 10 ? 'text-red-400 animate-pulse' : 'text-slate-400'
@@ -1113,7 +1130,7 @@ function ScanRow({ r, rank }: { r: ScanResult; rank: number }) {
             {' '}/ TP <span className="text-up">{r.tp_pct}%</span>
           </span>
         )}
-        <span className="text-xs text-slate-500 ml-auto">RSI {r.rsi}</span>
+        <span className="text-xs text-slate-500 ml-auto">{r.rsi != null ? `RSI ${r.rsi.toFixed(1)}` : ''}</span>
         <span className={clsx('text-sm font-bold w-10 text-right', c)}>{r.score}</span>
       </div>
       <div className="flex flex-wrap gap-1 pl-8">
@@ -1257,7 +1274,9 @@ function LogRow({ t, exchangeId }: { t: AutoBotTradeLog | AutoBotTradeDB; exchan
         <span className="text-slate-500">
           {isFuturesRow ? (t.side === 'short' ? '숏진입' : '롱진입') : '매수'}
         </span>
-        <span className="text-amber-400 font-semibold">{fmtCurrency(t.avg_price, isFuturesRow ? 'USDT' : exchangeId)}</span>
+        <span className="text-amber-400 font-semibold">
+          {isFuturesRow ? `$${parseFloat(t.avg_price.toFixed(4))}` : fmtCurrency(t.avg_price, exchangeId)}
+        </span>
         <span className="text-slate-600 mx-0.5">×</span>
         <span className="text-slate-300">{t.total_amount.toFixed(6)} {base}</span>
         <span className="text-slate-600 mx-1">=</span>
@@ -1265,7 +1284,7 @@ function LogRow({ t, exchangeId }: { t: AutoBotTradeLog | AutoBotTradeDB; exchan
         <span className="text-slate-600 mx-1">→</span>
         <span className="text-slate-500">{isFuturesRow ? '청산' : '매도'}</span>
         <span className={clsx('font-semibold', pos ? 'text-up' : 'text-down')}>
-          {fmtCurrency(t.exit_price, isFuturesRow ? 'USDT' : exchangeId)}
+          {isFuturesRow ? `$${parseFloat(t.exit_price.toFixed(4))}` : fmtCurrency(t.exit_price, exchangeId)}
         </span>
         <span className="text-slate-600 mx-0.5">=</span>
         <span className={clsx(pos ? 'text-up/80' : 'text-down/80')}>

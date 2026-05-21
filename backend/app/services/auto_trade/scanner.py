@@ -928,6 +928,8 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
     # ── 공통 지표 ────────────────────────────────────────────────────────────
     rsi_s = ta.rsi(close, length=14)
     rsi = float(rsi_s.iloc[-1]) if rsi_s is not None and not rsi_s.empty else 50.0
+    if math.isnan(rsi):
+        rsi = 50.0
 
     ema20  = ta.ema(close, length=20)
     ema50  = ta.ema(close, length=50)
@@ -961,9 +963,13 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
     bb_upper = bb_lower = bb_mid = 0.0
     if bb is not None and len(bb.dropna()) > 0:
         bc = bb.columns.tolist()
-        bb_lower = float(bb[bc[0]].iloc[-1])
-        bb_mid   = float(bb[bc[1]].iloc[-1])
-        bb_upper = float(bb[bc[2]].iloc[-1])
+        _bbl = float(bb[bc[0]].iloc[-1])
+        _bbm = float(bb[bc[1]].iloc[-1])
+        _bbu = float(bb[bc[2]].iloc[-1])
+        if not any(math.isnan(v) for v in [_bbl, _bbm, _bbu]):
+            bb_lower = _bbl
+            bb_mid   = _bbm
+            bb_upper = _bbu
 
     atr_s = ta.atr(high, low, close, length=14)
     atr = float(atr_s.iloc[-1]) if atr_s is not None and not atr_s.empty else 0.0
@@ -1088,8 +1094,10 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
                 candidates.append((strat, side, sc, sg))
 
     if not candidates:
-        return {**_empty, "rsi": rsi, "adx": adx, "volume_ratio": vol_ratio,
-                "bb_mid": bb_mid, "bb_lower": bb_lower, "price_change_pct": price_change_pct}
+        return {**_empty, "rsi": round(rsi, 1), "adx": round(adx, 1),
+                "volume_ratio": round(vol_ratio, 2),
+                "bb_mid": round(bb_mid, 2), "bb_lower": round(bb_lower, 2),
+                "price_change_pct": round(price_change_pct, 2)}
 
     strategy_type, side, score, signals = max(candidates, key=lambda x: x[2])
     cfg = FUTURES_STRATEGY_STYLE_CONFIGS.get(strategy_type, {}).get(style, {})
@@ -1097,7 +1105,7 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
     return {
         "symbol":           symbol,
         "score":            score,
-        "rsi":              rsi,
+        "rsi":              round(rsi, 1),
         "price":            current_price,
         "signals":          signals,
         "strategy_type":    strategy_type,
@@ -1106,15 +1114,15 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
         "tp_pct":           cfg.get("tp_pct"),
         "style":            style,
         "side":             side,
-        "volume_ratio":     vol_ratio,
-        "price_change_pct": price_change_pct,
+        "volume_ratio":     round(vol_ratio, 2),
+        "price_change_pct": round(price_change_pct, 2),
         "mtf_trend":        "bullish" if side == "long" else "bearish",
         "mtf_confirmed":    True,
-        "adx":              adx,
+        "adx":              round(adx, 1),
         "mr_score":         0,
         "mr_signals":       [],
-        "bb_mid":           bb_mid,
-        "bb_lower":         bb_lower,
+        "bb_mid":           round(bb_mid, 2),
+        "bb_lower":         round(bb_lower, 2),
     }
 
 
