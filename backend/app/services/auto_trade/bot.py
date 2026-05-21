@@ -1407,6 +1407,10 @@ class AutoTradeBot:
             self._last_scan_at = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
 
             # 봇 실행 중이고 일시정지 아닐 때 스캔 결과로 진입 시도
+            logger.info(
+                f"AutoBot 수동 스캔 완료: {len(results)}개 결과, "
+                f"running={self._running}, paused={self._paused}, is_futures={self._is_futures}"
+            )
             if self._running and not self._paused:
                 import time as _st
                 if self._is_futures:
@@ -1611,6 +1615,12 @@ class AutoTradeBot:
         TODO 1: AI 진입 확인 → confidence < 65면 스킵, 높으면 포지션 크기 증가.
         """
         try:
+            logger.info(
+                f"AutoBot _enter_from_scan: 후보 {len(scan_results)}개, "
+                f"min_score={self.settings['min_score']}, "
+                f"positions={len(self._positions)}/{self.settings['max_positions']}, "
+                f"regime={self._current_regime.get('regime')}"
+            )
             style = self.settings.get("trading_style", "short")
             preferred = STYLE_PREFERRED_STRATEGIES.get(style, [])
 
@@ -1695,6 +1705,12 @@ class AutoTradeBot:
                     ):
                         is_opportunistic = True
                     else:
+                        logger.info(
+                            f"AutoBot 점수 미달 스킵 {symbol}: "
+                            f"score={candidate['score']} < 기준={min_score_for_entry} "
+                            f"(min_score={self.settings['min_score']}, mtf_penalty={mtf_penalty}, "
+                            f"mtf_confirmed={candidate.get('mtf_confirmed', True)})"
+                        )
                         continue
 
                 # 실적 게이팅 (5거래 이상 & 승률 20% 미만일 때만 차단 — 초기 손실로 조기 차단 방지)
@@ -1916,6 +1932,7 @@ class AutoTradeBot:
 
     async def _open_position(self, symbol: str, scan_result: dict, price: Optional[float] = None, size_multiplier: float = 1.0, position_style: Optional[str] = None):
         if not self._connector:
+            logger.warning(f"AutoBot: _open_position {symbol} — connector 없음, 진입 불가")
             return
         try:
             if price is None:
@@ -2599,6 +2616,11 @@ class AutoTradeBot:
             if r["score"] >= min_score
             and r["symbol"] not in self._futures_positions
         ]
+        logger.info(
+            f"AutoBot _enter_futures_from_scan: 전체={len(scan_results)}개, "
+            f"min_score={min_score} 통과={len(candidates)}개, "
+            f"positions={len(self._futures_positions)}/{self.settings['max_positions']}"
+        )
         for candidate in candidates:
             if len(self._futures_positions) >= self.settings["max_positions"]:
                 break
@@ -2615,6 +2637,7 @@ class AutoTradeBot:
         leverage = self.settings["leverage"]
 
         if symbol in self._futures_positions:
+            logger.info(f"AutoBot 선물: {symbol} 이미 포지션 보유, 진입 스킵")
             return
 
         try:
@@ -2624,6 +2647,7 @@ class AutoTradeBot:
         except Exception as e:
             logger.warning(f"AutoBot 선물: {symbol} 마크가격 조회 실패 ({e})")
             return
+        logger.info(f"AutoBot 선물 진입 시도: {symbol} side={side} price={price} score={scan_result['score']}")
 
         # AI 진입 확인
         if ai_analyst.is_ai_available() and self.settings.get("ai_entry_validation", True):
@@ -2674,8 +2698,9 @@ class AutoTradeBot:
             sl_pct=sl_pct / 100,
         )
         if usdt_amount < 5:
-            logger.warning(f"AutoBot 선물: USDT 부족 ({usdt_balance:.2f}), 진입 불가")
+            logger.warning(f"AutoBot 선물: USDT 부족 ({usdt_balance:.2f} USDT, 필요 최소 5 USDT), 진입 불가")
             return
+        logger.info(f"AutoBot 선물: {symbol} 포지션 크기={usdt_amount:.2f} USDT, leverage={leverage}x, sl={sl_pct}%")
 
         try:
             entry_order = self._futures_broker.open_position(
