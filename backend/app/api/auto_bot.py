@@ -1,3 +1,4 @@
+import math
 from typing import Optional
 from fastapi import APIRouter, Depends, BackgroundTasks, Body, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,9 +13,20 @@ from .deps import get_current_user
 router = APIRouter(prefix="/auto-bot", tags=["auto-bot"])
 
 
+def _sanitize(obj):
+    """NaN/Inf float 값을 None으로 치환 (JSON 직렬화 오류 방지)."""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    return obj
+
+
 @router.get("/status")
 async def bot_status(user: User = Depends(get_current_user)):
-    return get_auto_bot().get_status()
+    return _sanitize(get_auto_bot().get_status())
 
 
 @router.post("/start")
@@ -233,7 +245,7 @@ async def update_futures_settings(
 async def get_futures_positions(user: User = Depends(get_current_user)):
     """현재 선물 포지션 목록 (청산가·펀딩비·레버리지 포함)."""
     bot = get_auto_bot()
-    return list(bot._futures_positions.values())
+    return _sanitize(list(bot._futures_positions.values()))
 
 
 @router.get("/trades/stats")
