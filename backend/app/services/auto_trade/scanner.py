@@ -498,6 +498,9 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
             rsi_oversold = True
         elif 45 < rsi <= 55:
             rsi_pts = 5
+        elif 55 < rsi <= 70:
+            rsi_pts = 8
+            signals.append(f"RSI 상승 모멘텀 ({rsi:.1f})")
         score += int(rsi_pts * weights["rsi"])
 
         # ── EMA 추세 (기본 20점, 가중치 적용) ──────────────────────────────
@@ -1082,6 +1085,8 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
             sc += 20; sg.append(f"거래량 증가 ({vol_ratio:.1f}x)")
         elif vol_ratio >= 1.2:
             sc += 10; sg.append(f"거래량 소폭 증가 ({vol_ratio:.1f}x)")
+        elif vol_ratio >= 1.0:
+            sc += 5;  sg.append(f"거래량 보통 ({vol_ratio:.1f}x)")
 
         return (sc, sg) if sc >= 20 else (0, [])  # 최소 임계값 미달 → 무효
 
