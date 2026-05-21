@@ -16,7 +16,11 @@ KST = timezone(timedelta(hours=9))
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from ..exchange.connector import ExchangeConnector, PaperBroker, BinanceFuturesConnector, FuturesPaperBroker, FUTURES_FEE_RATE
+from ..exchange.connector import (
+    ExchangeConnector, PaperBroker,
+    BinanceFuturesConnector, BybitFuturesConnector,
+    FuturesPaperBroker, FUTURES_FEE_RATES, FUTURES_MMR, FUTURES_FEE_RATE,
+)
 from .scanner import scan_market, scan_futures_market, FUTURES_SYMBOLS, STRATEGY_CONFIGS, STRATEGY_STYLE_CONFIGS, TIMEFRAME_MINUTES, HTF_MAP
 from . import ai_analyst
 from ..risk.manager import PortfolioRiskManager, calc_performance, calc_futures_position_size, calc_kelly_fraction
@@ -195,7 +199,7 @@ class AutoTradeBot:
         self._started_at: Optional[datetime] = None
 
         # ── 선물 거래 전용 ────────────────────────────────────────────────────
-        self._futures_connector: Optional[BinanceFuturesConnector] = None
+        self._futures_connector: Optional[BinanceFuturesConnector | BybitFuturesConnector] = None
         self._futures_broker = FuturesPaperBroker(initial_balance=1_000.0)
         self._futures_positions: dict[str, dict] = {}   # 선물 포지션 (롱/숏)
         self._last_funding_check: float = 0.0           # 마지막 펀딩비 체크 시각
@@ -314,16 +318,27 @@ class AutoTradeBot:
         exchange_id = self.settings.get("exchange_id", "upbit")
 
         if self._is_futures:
-            # 선물 모드: BinanceFuturesConnector 초기화 (시세 조회용)
+            # 선물 모드: 거래소별 커넥터 + 수수료/MMR 초기화
             from ...core.config import get_settings
             cfg = get_settings()
-            self._futures_connector = BinanceFuturesConnector(
-                api_key=cfg.BINANCE_API_KEY,
-                secret=cfg.BINANCE_SECRET,
-                testnet=cfg.BINANCE_FUTURES_TESTNET,
-            )
-            # ExchangeConnector도 시세/OHLCV 조회에 활용 (binance spot)
-            self._connector = ExchangeConnector(exchange_id="binance", is_paper=True)
+            if exchange_id == "bybit":
+                self._futures_connector = BybitFuturesConnector(
+                    api_key=cfg.BYBIT_API_KEY,
+                    secret=cfg.BYBIT_SECRET,
+                    testnet=getattr(cfg, "BYBIT_FUTURES_TESTNET", False),
+                )
+                self._connector = ExchangeConnector(exchange_id="bybit", is_paper=True)
+            else:
+                # 기본: Binance
+                self._futures_connector = BinanceFuturesConnector(
+                    api_key=cfg.BINANCE_API_KEY,
+                    secret=cfg.BINANCE_SECRET,
+                    testnet=cfg.BINANCE_FUTURES_TESTNET,
+                )
+                self._connector = ExchangeConnector(exchange_id="binance", is_paper=True)
+            # 거래소별 수수료율·MMR 적용
+            self._futures_broker.fee_rate = FUTURES_FEE_RATES.get(exchange_id, FUTURES_FEE_RATE)
+            self._futures_broker.mmr      = FUTURES_MMR.get(exchange_id, 0.005)
             # 선물 잔고 초기화 (기존 잔고 유지)
             if self._futures_broker.usdt_balance <= 0:
                 self._futures_broker.usdt_balance = 1_000.0
