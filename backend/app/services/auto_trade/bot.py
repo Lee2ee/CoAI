@@ -1391,13 +1391,31 @@ class AutoTradeBot:
             return
         self._scan_in_progress = True
         try:
-            results = await scan_market(
-                timeframe=self.settings["timeframe"],
-                style=self.settings["trading_style"],
-                exchange_id=self.settings.get("exchange_id", "upbit"),
-            )
+            if self._is_futures and self._futures_connector:
+                results = await scan_futures_market(
+                    connector=self._futures_connector,
+                    timeframe=self.settings["timeframe"],
+                    style=self.settings["trading_style"],
+                )
+            else:
+                results = await scan_market(
+                    timeframe=self.settings["timeframe"],
+                    style=self.settings["trading_style"],
+                    exchange_id=self.settings.get("exchange_id", "upbit"),
+                )
             self._scan_results = results
             self._last_scan_at = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+
+            # 봇 실행 중이고 일시정지 아닐 때 스캔 결과로 진입 시도
+            if self._running and not self._paused:
+                import time as _st
+                if self._is_futures:
+                    if len(self._futures_positions) < self.settings["max_positions"]:
+                        await self._enter_futures_from_scan(results)
+                else:
+                    if (len(self._positions) < self.settings["max_positions"]
+                            and _st.time() >= self._cooldown_until):
+                        await self._enter_from_scan(results)
         finally:
             self._scan_in_progress = False
 
