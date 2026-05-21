@@ -598,7 +598,7 @@ class AutoTradeBot:
                             price = await asyncio.wait_for(
                                 self._futures_connector.get_mark_price(symbol), timeout=5
                             )
-                            if price:
+                            if price and price > 0:
                                 pos = self._futures_positions.get(symbol)
                                 if pos:
                                     pos["current_price"] = price
@@ -2832,7 +2832,7 @@ class AutoTradeBot:
         """선물 포지션 SL/TP + 트레일링 + 손익분기 SL + AI 청산 보조."""
         for symbol, pos in list(self._futures_positions.items()):
             price = pos.get("current_price", pos["entry_price"])
-            if not price:
+            if not price or not (price > 0):
                 continue
 
             self._futures_broker.update_unrealized_pnl(symbol, price)

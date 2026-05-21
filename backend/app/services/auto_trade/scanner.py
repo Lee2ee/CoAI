@@ -22,6 +22,7 @@
 """
 import asyncio
 import logging
+import math
 import pandas_ta as ta
 import pandas as pd
 from ..exchange.connector import ExchangeConnector
@@ -388,6 +389,8 @@ def _score_mean_reversion(df: pd.DataFrame) -> tuple[list[str], int, float, floa
             bbm = float(bb[cols[1]].iloc[-1])
             bbu = float(bb[cols[2]].iloc[-1])
             price = float(close.iloc[-1])
+            if math.isnan(bbl) or math.isnan(bbm) or math.isnan(bbu):
+                raise ValueError("BB NaN")
             bb_mid = bbm
             bb_lower = bbl
             if bbu > bbl:
@@ -479,6 +482,8 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         # ── RSI (기본 30점, 가중치 적용) ────────────────────────────────────
         rsi_s = ta.rsi(close, length=14)
         rsi = float(rsi_s.iloc[-1]) if rsi_s is not None and not rsi_s.empty else 50.0
+        if math.isnan(rsi):
+            rsi = 50.0
 
         rsi_strong_oversold = False
         rsi_oversold = False
@@ -808,43 +813,45 @@ async def scan_market(
     htf = HTF_MAP.get(timeframe, timeframe)
     results = []
 
-    symbols = await _fetch_dynamic_symbols(connector, style, exchange_id)
+    try:
+        symbols = await _fetch_dynamic_symbols(connector, style, exchange_id)
 
-    for symbol in symbols:
-        try:
-            df = await asyncio.wait_for(
-                connector.fetch_ohlcv(symbol, timeframe, limit=150),
-                timeout=12,
-            )
-            if len(df) < 60:
-                continue
-
-            daily_vol = _daily_volume_krw(df, timeframe)
-            if daily_vol < min_vol:
-                logger.debug(
-                    f"Skip {symbol}: 거래대금 {daily_vol/1e8:.0f}억 < 기준 {min_vol/1e8:.0f}억"
+        for symbol in symbols:
+            try:
+                df = await asyncio.wait_for(
+                    connector.fetch_ohlcv(symbol, timeframe, limit=150),
+                    timeout=12,
                 )
-                continue
+                if len(df) < 60:
+                    continue
 
-            # 멀티 타임프레임 확인 (HTF 가 주 TF와 다를 때만 추가 fetch)
-            htf_df = None
-            if htf != timeframe:
-                try:
-                    htf_df = await asyncio.wait_for(
-                        connector.fetch_ohlcv(symbol, htf, limit=60),
-                        timeout=12,
+                daily_vol = _daily_volume_krw(df, timeframe)
+                if daily_vol < min_vol:
+                    logger.debug(
+                        f"Skip {symbol}: 거래대금 {daily_vol/1e8:.0f}억 < 기준 {min_vol/1e8:.0f}억"
                     )
-                except Exception:
-                    pass  # HTF 실패 시 mtf_confirmed=True(기본) 유지
+                    continue
 
-            results.append(_score(df, symbol, style, htf_df=htf_df))
-            await asyncio.sleep(0.15)
-        except asyncio.TimeoutError:
-            logger.debug(f"Timeout scanning {symbol}")
-        except Exception as e:
-            logger.debug(f"Skip {symbol}: {e}")
+                # 멀티 타임프레임 확인 (HTF 가 주 TF와 다를 때만 추가 fetch)
+                htf_df = None
+                if htf != timeframe:
+                    try:
+                        htf_df = await asyncio.wait_for(
+                            connector.fetch_ohlcv(symbol, htf, limit=60),
+                            timeout=12,
+                        )
+                    except Exception:
+                        pass  # HTF 실패 시 mtf_confirmed=True(기본) 유지
 
-    await connector.close()
+                results.append(_score(df, symbol, style, htf_df=htf_df))
+                await asyncio.sleep(0.15)
+            except asyncio.TimeoutError:
+                logger.debug(f"Timeout scanning {symbol}")
+            except Exception as e:
+                logger.debug(f"Skip {symbol}: {e}")
+    finally:
+        await connector.close()
+
     results.sort(key=lambda x: x["score"], reverse=True)
     return results
 
