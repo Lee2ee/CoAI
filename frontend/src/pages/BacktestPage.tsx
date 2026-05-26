@@ -118,6 +118,8 @@ export default function BacktestPage({ initialConfig }: Props) {
     EXCHANGES.find(e => e.id === (initialConfig?.exchange ?? 'upbit'))?.fee ?? 0.05
   )
   const [walkForward, setWalkForward] = useState(false)
+  const [quantSizing, setQuantSizing] = useState(true)
+  const [monteCarlo, setMonteCarlo] = useState(false)
 
   const handleExchangeChange = (id: string) => {
     setExchange(id)
@@ -151,6 +153,9 @@ export default function BacktestPage({ initialConfig }: Props) {
       initial_capital: initialCapital,
       fee_rate: feeRate / 100,
       walk_forward: walkForward,
+      quant_sizing: quantSizing,
+      monte_carlo: monteCarlo,
+      monte_carlo_runs: 500,
     })
   }
 
@@ -276,6 +281,16 @@ export default function BacktestPage({ initialConfig }: Props) {
             onChange={e => setWalkForward(e.target.checked)} className="w-4 h-4 rounded" />
           <span className="text-sm text-slate-300">Walk-Forward 분석 (과최적화 방지)</span>
         </label>
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" checked={quantSizing}
+            onChange={e => setQuantSizing(e.target.checked)} className="w-4 h-4 rounded" />
+          <span className="text-sm text-slate-300">퀀트 sizing (변동성/손실허용액 기반)</span>
+        </label>
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" checked={monteCarlo}
+            onChange={e => setMonteCarlo(e.target.checked)} className="w-4 h-4 rounded" />
+          <span className="text-sm text-slate-300">Monte Carlo 견고성 분석</span>
+        </label>
 
         <button onClick={run} disabled={mutation.isPending}
           className="btn-primary flex items-center gap-2 disabled:opacity-50">
@@ -357,6 +372,18 @@ export default function BacktestPage({ initialConfig }: Props) {
             </div>
           )}
 
+          {result.monte_carlo_results && (
+            <div className="card">
+              <h3 className="text-sm font-semibold text-slate-300 mb-3">Monte Carlo 견고성</h3>
+              <div className="grid grid-cols-4 gap-3">
+                <MiniMetric label="평균 수익률" value={`${Number(result.monte_carlo_results.mean_pnl_pct ?? 0).toFixed(2)}%`} />
+                <MiniMetric label="5~95% 구간" value={(result.monte_carlo_results.pnl_confidence_interval as number[] | undefined)?.map(v => `${v.toFixed(1)}%`).join(' ~ ') ?? '-'} />
+                <MiniMetric label="평균 MDD" value={`-${Number(result.monte_carlo_results.mean_max_drawdown ?? 0).toFixed(2)}%`} color="down" />
+                <MiniMetric label="양수 비율" value={`${Number(result.monte_carlo_results.robustness_score ?? 0).toFixed(1)}%`} />
+              </div>
+            </div>
+          )}
+
           <div className="card">
             <h3 className="text-sm font-semibold text-slate-300 mb-3">개별 거래 ({result.trades.length}건)</h3>
             {result.trades.length === 0 ? (
@@ -429,6 +456,17 @@ function StatCard({ label, value, subValue, color }: { label: string; value: str
         {value}
       </p>
       {subValue && <p className="text-xs text-slate-500 mt-0.5">{subValue}</p>}
+    </div>
+  )
+}
+
+function MiniMetric({ label, value, color }: { label: string; value: string; color?: 'up' | 'down' }) {
+  return (
+    <div className="bg-surface-700 rounded-lg px-3 py-2 text-center">
+      <p className="text-xs text-slate-400">{label}</p>
+      <p className={clsx('text-sm font-semibold mt-1', color === 'up' ? 'text-up' : color === 'down' ? 'text-down' : 'text-slate-100')}>
+        {value}
+      </p>
     </div>
   )
 }

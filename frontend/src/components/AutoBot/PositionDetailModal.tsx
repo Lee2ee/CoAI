@@ -68,7 +68,7 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose, 
       })
       return res.data.data
     },
-    refetchInterval: 30_000,
+    refetchInterval: 10_000,
   })
 
   // 최신 OHLCV 참조 (WebSocket 핸들러 클로저 스테일 방지)

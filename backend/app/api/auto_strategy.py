@@ -7,6 +7,7 @@ AI 자동 전략 생성 - 멀티 프로바이더 지원.
 - openai:    ChatGPT (유료)
 - gemini:    Google Gemini (무료 Flash 포함)
 """
+
 import json
 import asyncio
 import logging
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 # ─── LLM 호출 (ai_settings.json 기반) ─────────────────────────────────────
 
+
 async def _call_llm(system: str, user_msg: str, cfg: dict) -> str:
     provider = cfg.get("provider", "ollama")
 
@@ -43,7 +45,9 @@ async def _call_llm(system: str, user_msg: str, cfg: dict) -> str:
     elif provider == "gemini":
         return await _call_gemini(system, user_msg, cfg)
     else:
-        raise HTTPException(status_code=400, detail=f"알 수 없는 AI 프로바이더: {provider}")
+        raise HTTPException(
+            status_code=400, detail=f"알 수 없는 AI 프로바이더: {provider}"
+        )
 
 
 async def _call_ollama(system: str, user_msg: str, cfg: dict) -> str:
@@ -73,7 +77,10 @@ async def _call_ollama(system: str, user_msg: str, cfg: dict) -> str:
 async def _call_groq(system: str, user_msg: str, cfg: dict) -> str:
     api_key = cfg.get("api_key", "")
     if not api_key:
-        raise HTTPException(status_code=503, detail="Groq API 키가 설정되지 않았습니다. 설정 메뉴에서 입력해주세요.")
+        raise HTTPException(
+            status_code=503,
+            detail="Groq API 키가 설정되지 않았습니다. 설정 메뉴에서 입력해주세요.",
+        )
     payload = {
         "model": cfg.get("model", "llama-3.3-70b-versatile"),
         "messages": [
@@ -90,16 +97,25 @@ async def _call_groq(system: str, user_msg: str, cfg: dict) -> str:
             headers={"Authorization": f"Bearer {api_key}"},
         )
         if res.status_code == 429:
-            raise HTTPException(status_code=429, detail="Groq API 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.")
+            raise HTTPException(
+                status_code=429,
+                detail="Groq API 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.",
+            )
         if res.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Groq API 오류 ({res.status_code}): {res.text[:200]}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Groq API 오류 ({res.status_code}): {res.text[:200]}",
+            )
     return res.json()["choices"][0]["message"]["content"]
 
 
 async def _call_anthropic(system: str, user_msg: str, cfg: dict) -> str:
     api_key = cfg.get("api_key", "")
     if not api_key:
-        raise HTTPException(status_code=503, detail="Claude API 키가 설정되지 않았습니다. 설정 메뉴에서 입력해주세요.")
+        raise HTTPException(
+            status_code=503,
+            detail="Claude API 키가 설정되지 않았습니다. 설정 메뉴에서 입력해주세요.",
+        )
     payload = {
         "model": cfg.get("model", "claude-sonnet-4-6"),
         "max_tokens": 1500,
@@ -113,16 +129,25 @@ async def _call_anthropic(system: str, user_msg: str, cfg: dict) -> str:
             headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
         )
         if res.status_code == 429:
-            raise HTTPException(status_code=429, detail="Claude API 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.")
+            raise HTTPException(
+                status_code=429,
+                detail="Claude API 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.",
+            )
         if res.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Claude API 오류 ({res.status_code}): {res.text[:200]}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Claude API 오류 ({res.status_code}): {res.text[:200]}",
+            )
     return res.json()["content"][0]["text"]
 
 
 async def _call_openai(system: str, user_msg: str, cfg: dict) -> str:
     api_key = cfg.get("api_key", "")
     if not api_key:
-        raise HTTPException(status_code=503, detail="OpenAI API 키가 설정되지 않았습니다. 설정 메뉴에서 입력해주세요.")
+        raise HTTPException(
+            status_code=503,
+            detail="OpenAI API 키가 설정되지 않았습니다. 설정 메뉴에서 입력해주세요.",
+        )
     payload = {
         "model": cfg.get("model", "gpt-4o"),
         "messages": [
@@ -139,16 +164,25 @@ async def _call_openai(system: str, user_msg: str, cfg: dict) -> str:
             headers={"Authorization": f"Bearer {api_key}"},
         )
         if res.status_code == 429:
-            raise HTTPException(status_code=429, detail="OpenAI API 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.")
+            raise HTTPException(
+                status_code=429,
+                detail="OpenAI API 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.",
+            )
         if res.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"OpenAI API 오류 ({res.status_code}): {res.text[:200]}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"OpenAI API 오류 ({res.status_code}): {res.text[:200]}",
+            )
     return res.json()["choices"][0]["message"]["content"]
 
 
 async def _call_gemini(system: str, user_msg: str, cfg: dict) -> str:
     api_key = cfg.get("api_key", "")
     if not api_key:
-        raise HTTPException(status_code=503, detail="Gemini API 키가 설정되지 않았습니다. 설정 메뉴에서 입력해주세요.")
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini API 키가 설정되지 않았습니다. 설정 메뉴에서 입력해주세요.",
+        )
     model = cfg.get("model", "gemini-2.0-flash")
     payload = {
         "contents": [{"role": "user", "parts": [{"text": f"{system}\n\n{user_msg}"}]}],
@@ -160,15 +194,25 @@ async def _call_gemini(system: str, user_msg: str, cfg: dict) -> str:
             json=payload,
         )
         if res.status_code == 429:
-            raise HTTPException(status_code=429, detail="Gemini API 무료 할당량을 초과했습니다. 잠시 후 다시 시도하거나, Google AI Studio에서 플랜을 확인하세요.")
+            raise HTTPException(
+                status_code=429,
+                detail="Gemini API 무료 할당량을 초과했습니다. 잠시 후 다시 시도하거나, Google AI Studio에서 플랜을 확인하세요.",
+            )
         if res.status_code == 401 or res.status_code == 403:
-            raise HTTPException(status_code=502, detail="Gemini API 키가 유효하지 않습니다. 설정 메뉴에서 키를 확인하세요.")
+            raise HTTPException(
+                status_code=502,
+                detail="Gemini API 키가 유효하지 않습니다. 설정 메뉴에서 키를 확인하세요.",
+            )
         if res.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Gemini API 오류 ({res.status_code}): {res.text[:200]}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Gemini API 오류 ({res.status_code}): {res.text[:200]}",
+            )
     return res.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
 # ─── 시장 분석 ──────────────────────────────────────────────────────────────
+
 
 def _build_market_summary(df, symbol: str, timeframe: str) -> str:
     close = df["close"]
@@ -193,9 +237,15 @@ def _build_market_summary(df, symbol: str, timeframe: str) -> str:
     try:
         ema20 = compute_indicator(df, "EMA", {"length": 20})
         ema50 = compute_indicator(df, "EMA", {"length": 50})
-        lines.append(f"EMA20: {float(ema20.iloc[-1]):,.0f}, EMA50: {float(ema50.iloc[-1]):,.0f}")
-        lines.append(f"Price vs EMA20: {(current_price/float(ema20.iloc[-1])-1)*100:+.2f}%")
-        lines.append(f"EMA20 vs EMA50: {(float(ema20.iloc[-1])/float(ema50.iloc[-1])-1)*100:+.2f}%")
+        lines.append(
+            f"EMA20: {float(ema20.iloc[-1]):,.0f}, EMA50: {float(ema50.iloc[-1]):,.0f}"
+        )
+        lines.append(
+            f"Price vs EMA20: {(current_price/float(ema20.iloc[-1])-1)*100:+.2f}%"
+        )
+        lines.append(
+            f"EMA20 vs EMA50: {(float(ema20.iloc[-1])/float(ema50.iloc[-1])-1)*100:+.2f}%"
+        )
     except Exception:
         pass
 
@@ -223,7 +273,9 @@ def _build_market_summary(df, symbol: str, timeframe: str) -> str:
     try:
         stoch = compute_indicator(df, "STOCH", {"k": 14, "d": 3, "smooth_k": 3})
         cols = stoch.columns.tolist()
-        lines.append(f"Stochastic K: {float(stoch[cols[0]].iloc[-1]):.2f}, D: {float(stoch[cols[1]].iloc[-1]):.2f}")
+        lines.append(
+            f"Stochastic K: {float(stoch[cols[0]].iloc[-1]):.2f}, D: {float(stoch[cols[1]].iloc[-1]):.2f}"
+        )
     except Exception:
         pass
 
@@ -234,13 +286,16 @@ def _build_market_summary(df, symbol: str, timeframe: str) -> str:
     except Exception:
         pass
 
-    lines.append("\nRecent 10 closes: " + ", ".join(f"{float(v):,.0f}" for v in df["close"].tail(10).tolist()))
+    lines.append(
+        "\nRecent 10 closes: "
+        + ", ".join(f"{float(v):,.0f}" for v in df["close"].tail(10).tolist())
+    )
     return "\n".join(lines)
 
 
 # ─── 프롬프트 ───────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are an expert quantitative trading strategy designer.
+SYSTEM_PROMPT = """You are an expert quantitative trading strategy designer specializing in high-probability, profitable strategies.
 Analyze market data and return ONLY a valid JSON object with this exact structure (no markdown, no explanation):
 
 {
@@ -250,12 +305,37 @@ Analyze market data and return ONLY a valid JSON object with this exact structur
   "entry_conditions": [...],
   "exit_conditions": [...],
   "risk": {
-    "stop_loss_pct": 2.0,
-    "take_profit_pct": 5.0,
-    "position_size_pct": 5.0,
-    "trailing_stop": false
+    "stop_loss_pct": 1.5,
+    "take_profit_pct": 6.0,
+    "position_size_pct": 8.0,
+    "trailing_stop": true,
+    "trailing_pct": 1.0
   }
 }
+
+PROFIT MAXIMIZATION RULES:
+
+1. **Entry Conditions Priority** (highest win rate first):
+   - RSI oversold (25-35) + confirmation signal (STOCH < 25, BB_LOWER cross_above)
+   - EMA golden cross (fast EMA crosses above slow EMA)
+   - MACD bullish divergence + volume confirmation
+   - Bollinger Band squeeze breakout (price > BB_UPPER after contraction)
+
+2. **Exit Conditions** (maximize profit, minimize losses):
+   - Profit targets: 4-8% (2-3x stop loss)
+   - RSI overbought (65-75) for profit taking
+   - MACD bearish crossover
+   - Trailing stop: 1-2% below peak price
+
+3. **Risk Management** (protect capital):
+   - Stop loss: 1.5-2.5% (tight but realistic)
+   - Position size: 5-10% of capital per trade
+   - Max daily loss: 3-5% of portfolio
+
+4. **Market Regime Adaptation**:
+   - Volatile markets: wider stops (2.5%), smaller positions (5%)
+   - Trending markets: trailing stops, higher targets (8%)
+   - Sideways markets: mean reversion strategies (RSI, BB)
 
 Indicators available: RSI, EMA, SMA, MACD, BB_UPPER, BB_LOWER, STOCH, EMA_CROSS
 Operators: <, >, <=, >=, cross_above, cross_below
@@ -278,24 +358,39 @@ CRITICAL RULES — violations will cause 0 trades:
 
 4. Keep it simple: prefer 1-2 entry conditions that realistically fire together.
 
-5. stop_loss_pct: 1.5-4.0, take_profit_pct: 2x-3x stop_loss_pct, position_size_pct: 3-10
-
-Examples of VALID strategies:
-- Cross-based: entry=[EMA_CROSS cross_above], exit=[EMA_CROSS cross_below]
-- State-based: entry=[RSI<=30, STOCH<=25], exit=[RSI>=65]
-- Single condition: entry=[MACD cross_above value=0], exit=[MACD cross_below value=0]"""
+HIGH-PROFIT STRATEGY EXAMPLES:
+- Momentum: entry=[EMA_CROSS cross_above], exit=[RSI >= 70], risk={"stop_loss_pct":1.5,"take_profit_pct":7.0,"trailing_stop":true}
+- Mean Reversion: entry=[RSI <= 30, BB_LOWER > 0], exit=[RSI >= 65], risk={"stop_loss_pct":2.0,"take_profit_pct":5.0}
+- Breakout: entry=[MACD cross_above value=0], exit=[MACD cross_below value=0], risk={"stop_loss_pct":1.5,"take_profit_pct":6.0,"trailing_stop":true}"""
 
 
 # 동적 심볼 조회 실패 시 fallback 목록
 _FALLBACK_SYMBOLS = [
-    "BTC/KRW", "ETH/KRW", "XRP/KRW", "SOL/KRW", "DOGE/KRW",
-    "ADA/KRW", "AVAX/KRW", "LINK/KRW", "DOT/KRW", "ATOM/KRW",
-    "MATIC/KRW", "LTC/KRW", "BCH/KRW", "ETC/KRW", "TRX/KRW",
-    "NEAR/KRW", "APT/KRW", "OP/KRW", "SUI/KRW", "SEI/KRW",
+    "BTC/KRW",
+    "ETH/KRW",
+    "XRP/KRW",
+    "SOL/KRW",
+    "DOGE/KRW",
+    "ADA/KRW",
+    "AVAX/KRW",
+    "LINK/KRW",
+    "DOT/KRW",
+    "ATOM/KRW",
+    "MATIC/KRW",
+    "LTC/KRW",
+    "BCH/KRW",
+    "ETC/KRW",
+    "TRX/KRW",
+    "NEAR/KRW",
+    "APT/KRW",
+    "OP/KRW",
+    "SUI/KRW",
+    "SEI/KRW",
 ]
 
 
 # ─── API 엔드포인트 ─────────────────────────────────────────────────────────
+
 
 class AutoStrategyRequest(BaseModel):
     symbol: str = "BTC/KRW"
@@ -327,10 +422,13 @@ async def get_symbols(user: User = Depends(get_current_user)):
     try:
         markets = await asyncio.wait_for(connector._exchange.load_markets(), timeout=15)
         await connector.close()
-        symbols = sorted([
-            s for s in markets.keys()
-            if s.endswith("/KRW") and markets[s].get("active", True)
-        ])
+        symbols = sorted(
+            [
+                s
+                for s in markets.keys()
+                if s.endswith("/KRW") and markets[s].get("active", True)
+            ]
+        )
         return {"symbols": symbols}
     except Exception:
         await connector.close()
@@ -364,7 +462,10 @@ async def generate_strategy(
         raise HTTPException(status_code=502, detail=f"시장 데이터 조회 실패: {e}")
 
     if df is None or len(df) < 50:
-        raise HTTPException(status_code=502, detail=f"{symbol} 데이터가 부족합니다. 다른 타임프레임을 시도해보세요.")
+        raise HTTPException(
+            status_code=502,
+            detail=f"{symbol} 데이터가 부족합니다. 다른 타임프레임을 시도해보세요.",
+        )
 
     market_summary = _build_market_summary(df, symbol, req.timeframe)
 
@@ -372,12 +473,14 @@ async def generate_strategy(
     ai_cfg = await get_user_ai_config(user.id, db)
 
     # 심볼을 프롬프트에 직접 주입
-    system_prompt = SYSTEM_PROMPT.replace("{{SYMBOL}}", symbol).replace("{{TIMEFRAME}}", req.timeframe)
+    system_prompt = SYSTEM_PROMPT.replace("{{SYMBOL}}", symbol).replace(
+        "{{TIMEFRAME}}", req.timeframe
+    )
     user_prompt = (
         f"Analyze the following market data and generate an optimal trading strategy.\n\n"
         f"{market_summary}\n\n"
         f"Generate a complete strategy JSON for {symbol} {req.timeframe}. "
-        f"The symbol field MUST be exactly \"{symbol}\". Return ONLY the JSON object."
+        f'The symbol field MUST be exactly "{symbol}". Return ONLY the JSON object.'
     )
 
     # AI 호출
@@ -397,14 +500,16 @@ async def generate_strategy(
         config = json.loads(text[start:end])
     except Exception as e:
         logger.error(f"JSON parse error: {e}\nRaw: {raw_text[:500]}")
-        raise HTTPException(status_code=502, detail="AI 응답 파싱 실패. 다시 시도해주세요.")
+        raise HTTPException(
+            status_code=502, detail="AI 응답 파싱 실패. 다시 시도해주세요."
+        )
 
     # 필수 필드 검증
     for field in ["entry_conditions", "exit_conditions", "risk"]:
         if field not in config:
             raise HTTPException(
                 status_code=502,
-                detail=f"AI가 올바른 형식을 반환하지 않았습니다 (missing: {field}). 다시 시도해주세요."
+                detail=f"AI가 올바른 형식을 반환하지 않았습니다 (missing: {field}). 다시 시도해주세요.",
             )
 
     # 심볼/타임프레임/거래소를 요청값으로 강제 덮어씀 (AI가 잘못 반환해도 안전)
