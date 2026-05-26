@@ -505,6 +505,19 @@ export default function PositionDetailModal({ pos, maxAvgDown, maxAdd, onClose, 
   )
 }
 
+const POSITION_STYLE_META: Record<string, { badge: string; border: string }> = {
+  scalping: { badge: 'bg-purple-500/20 text-purple-400', border: 'border-purple-500/50' },
+  short:    { badge: 'bg-blue-500/20 text-blue-400',     border: 'border-blue-500/50' },
+  mid:      { badge: 'bg-amber-500/20 text-amber-400',   border: 'border-amber-500/50' },
+  long:     { badge: 'bg-green-500/20 text-green-400',   border: 'border-green-500/50' },
+}
+
+const RISK_PROFILE_META: Record<string, { label: string; badge: string; border: string }> = {
+  conservative: { label: '보수적', badge: 'bg-blue-500/20 text-blue-400',   border: 'border-blue-500/50' },
+  balanced:     { label: '균형',   badge: 'bg-slate-500/20 text-slate-300', border: 'border-slate-500/50' },
+  aggressive:   { label: '공격적', badge: 'bg-red-500/20 text-red-400',     border: 'border-red-500/50' },
+}
+
 // 전략 타입별 스타일 & 설명
 const STRATEGY_META: Record<string, { border: string; bg: string; badge: string; icon: string; desc: string }> = {
   oversold_bounce: {
@@ -552,6 +565,22 @@ function StrategyBanner({ pos }: { pos: AutoBotPosition }) {
         <span className={clsx('text-xs font-bold px-2 py-0.5 rounded', meta.badge)}>
           {label}
         </span>
+        {pos.position_style_label && (() => {
+          const sm = POSITION_STYLE_META[pos.position_style] ?? { badge: 'bg-surface-600 text-slate-400', border: 'border-surface-500' }
+          return (
+            <span className={clsx('text-xs px-1.5 py-0.5 rounded font-medium border', sm.badge, sm.border)}>
+              {pos.position_style_label}
+            </span>
+          )
+        })()}
+        {pos.risk_profile && (() => {
+          const rm = RISK_PROFILE_META[pos.risk_profile] ?? { label: pos.risk_profile, badge: 'bg-surface-600 text-slate-400', border: 'border-surface-500' }
+          return (
+            <span className={clsx('text-xs px-1.5 py-0.5 rounded font-medium border', rm.badge, rm.border)}>
+              {rm.label}
+            </span>
+          )
+        })()}
         <span className="text-xs text-slate-500 ml-auto flex items-center gap-3">
           <span>
             {slAboveEntry ? (

@@ -330,6 +330,8 @@ class AutoTradeBot:
             "market_type": "spot",  # "spot" | "futures"
             "leverage": 5,  # 레버리지 배수 (1~20)
             "margin_mode": "cross",  # "cross" | "isolated"
+            # ── 자동 스타일 전환 허용 목록 ────────────────────────────────────
+            "allowed_styles": ["scalping", "short", "mid", "long"],
         }
 
     # ── 프로퍼티 ─────────────────────────────────────────────────────────────
@@ -1130,8 +1132,10 @@ class AutoTradeBot:
             regime, style, delta = "trending", "short", +3
             reason = f"상승추세 (20봉 {change_20:+.1f}%, RSI {btc_rsi:.0f})"
         elif change_20 <= -8:
-            regime, style, delta = "downtrend", "long", +5
-            reason = f"하락추세 (20봉 {change_20:+.1f}%, RSI {btc_rsi:.0f})"
+            # 하락추세에서 "long" 스타일(SL -12%)은 손실 폭을 키움.
+            # scalping(SL -1%)으로 손실을 최소화하고 반등 신호에만 소량 진입.
+            regime, style, delta = "downtrend", "scalping", +15
+            reason = f"하락추세 (20봉 {change_20:+.1f}%, RSI {btc_rsi:.0f}) → 스캘핑 전환, 진입 기준 +15"
         elif btc_rsi < 28:
             regime, style, delta = "volatile", "scalping", 0
             reason = f"과매도 반등 구간 (RSI {btc_rsi:.0f})"
@@ -1257,6 +1261,25 @@ class AutoTradeBot:
             delta = regime["min_score_delta"]
             changed = []
 
+            # 사용자 허용 목록 필터 — 허용되지 않은 스타일이면 가장 가까운 허용 스타일로 대체
+            _style_order = ["scalping", "short", "mid", "long"]
+            allowed = self.settings.get("allowed_styles") or _style_order
+            if new_style not in allowed:
+                idx = _style_order.index(new_style) if new_style in _style_order else 1
+                # 인접한 허용 스타일을 가까운 순서로 탐색
+                for offset in range(1, len(_style_order)):
+                    for candidate in [_style_order[idx - offset] if idx - offset >= 0 else None,
+                                      _style_order[idx + offset] if idx + offset < len(_style_order) else None]:
+                        if candidate and candidate in allowed:
+                            logger.info(f"AutoBot 국면: 스타일 {new_style} 미허용 → {candidate}로 대체")
+                            new_style = candidate
+                            regime = {**regime, "style": new_style}
+                            self._current_regime = regime
+                            break
+                    else:
+                        continue
+                    break
+
             if new_strategy_mode != old_strategy_mode:
                 changed.append(f"전략모드 {old_strategy_mode}→{new_strategy_mode}")
 
@@ -1269,9 +1292,12 @@ class AutoTradeBot:
 
             # delta는 절대값(이전 delta를 되돌리고 새 delta를 적용)으로 처리.
             # 누적 가산 방지: 같은 국면이 15분마다 반복돼도 min_score가 계속 오르지 않음.
+            # 단, update_settings가 min_score를 새 스타일 기본값으로 리셋한 뒤 delta를 빼므로
+            # 새 스타일의 preset base보다 낮아지지 않도록 floor를 걸어줌.
             delta_change = delta - old_delta
             if delta_change != 0:
-                new_score = max(40, min(72, self.settings["min_score"] + delta_change))
+                preset_floor = TRADING_STYLE_PRESETS.get(new_style, {}).get("min_score", 40)
+                new_score = max(preset_floor, min(72, self.settings["min_score"] + delta_change))
                 if new_score != self.settings["min_score"]:
                     self.settings["min_score"] = new_score
                     changed.append(f"최소점수 {new_score}")
@@ -1622,6 +1648,7 @@ class AutoTradeBot:
                     and pos["avg_down_count"] < self.settings["max_avg_down"]
                     and pnl_pct < 0
                     and balance >= 5_000
+                    and self._current_regime.get("regime") != "downtrend"  # 하락추세에서 물타기 금지
                     and self._should_avg_down(pos, current_price, scan)
                 ):
                     await self._add_to_position(symbol, "avg_down", current_price)
@@ -1727,7 +1754,7 @@ class AutoTradeBot:
                 # ── 멀티 타임프레임 확인 ─────────────────────────────────────
                 # 상위봉 bearish 추세 시 min_score +5 (급등 오버라이드 예외)
                 mtf_confirmed = candidate.get("mtf_confirmed", True)
-                mtf_penalty = 0 if (mtf_confirmed or is_surge) else 5
+                mtf_penalty = 0 if (mtf_confirmed or is_surge) else 10
 
                 if strategy_mode == "mean_reversion" and not is_surge:
                     min_score_for_entry = 30  # MR 모드: mr_score 30 이상이면 진입
@@ -1943,7 +1970,7 @@ class AutoTradeBot:
                         signals=candidate.get("signals", []),
                         rsi=candidate.get("rsi", 50.0),
                     )
-                    if not ai_result["enter"] or ai_result["confidence"] < 65:
+                    if not ai_result["enter"] or ai_result["confidence"] < 55:
                         logger.info(
                             f"AutoBot 초단타 AI 거부 {symbol}: "
                             f"confidence={ai_result['confidence']} reason={ai_result['reason']}"
@@ -2287,9 +2314,10 @@ class AutoTradeBot:
                 "trailing_active": False,
                 "trailing_activate_pct": pos_preset["trailing_activate_pct"],
                 "trailing_pct": pos_preset["trailing_pct"],
-                # 포지션별 매매 스타일
+                # 포지션별 매매 스타일 & 투자 성향
                 "position_style": pos_style,
                 "position_style_label": pos_preset["label"],
+                "risk_profile":         self.settings.get("risk_profile", "balanced"),
                 # 메타
                 "entry_at": now,
                 "score": scan_result.get("score", 0),
@@ -2769,6 +2797,19 @@ class AutoTradeBot:
                 "position_style": pos.get(
                     "position_style", self.settings.get("trading_style", "short")
                 ),
+                "position_style_label": pos.get(
+                    "position_style_label",
+                    TRADING_STYLE_PRESETS.get(
+                        pos.get(
+                            "position_style",
+                            self.settings.get("trading_style", "short"),
+                        ),
+                        {},
+                    ).get("label", "단타"),
+                ),
+                "risk_profile": pos.get(
+                    "risk_profile", self.settings.get("risk_profile", "balanced")
+                ),
                 "market_regime": pos.get("market_regime", "ranging"),
                 "strategy_mode": pos.get("strategy_mode", "momentum"),
                 "timeframe": pos.get("timeframe", self.settings.get("timeframe", "1h")),
@@ -2930,6 +2971,10 @@ class AutoTradeBot:
         tp_price = (
             price * (1 + tp_pct / 100) if side == "long" else price * (1 - tp_pct / 100)
         )
+        position_style = self.settings.get("trading_style", "short")
+        position_style_label = TRADING_STYLE_PRESETS.get(position_style, {}).get(
+            "label", "단타"
+        )
 
         self._futures_positions[symbol] = {
             "symbol": symbol,
@@ -2958,7 +3003,9 @@ class AutoTradeBot:
             "signals": scan_result.get("signals", []),
             "strategy_type": scan_result.get("strategy_type", "standard"),
             "strategy_label": scan_result.get("strategy_label", "표준"),
-            "position_style": self.settings.get("trading_style", "short"),
+            "position_style": position_style,
+            "position_style_label": position_style_label,
+            "risk_profile": self.settings.get("risk_profile", "balanced"),
             "market_regime": self._current_regime.get("regime", "ranging"),
             "strategy_mode": self._current_regime.get("strategy_mode", "momentum"),
             "timeframe": self.settings.get("timeframe", "1h"),
@@ -3023,6 +3070,19 @@ class AutoTradeBot:
                 "strategy_type": pos.get("strategy_type", "standard"),
                 "position_style": pos.get(
                     "position_style", self.settings.get("trading_style", "short")
+                ),
+                "position_style_label": pos.get(
+                    "position_style_label",
+                    TRADING_STYLE_PRESETS.get(
+                        pos.get(
+                            "position_style",
+                            self.settings.get("trading_style", "short"),
+                        ),
+                        {},
+                    ).get("label", "단타"),
+                ),
+                "risk_profile": pos.get(
+                    "risk_profile", self.settings.get("risk_profile", "balanced")
                 ),
                 "market_regime": pos.get("market_regime", "ranging"),
                 "strategy_mode": pos.get("strategy_mode", "momentum"),
@@ -3131,6 +3191,16 @@ class AutoTradeBot:
                         exit_reason=record["exit_reason"],
                         strategy_type=pos.get("strategy_type", "standard"),
                         strategy_label=pos.get("strategy_label", "표준"),
+                        position_style=record.get(
+                            "position_style", pos.get("position_style", "short")
+                        ),
+                        position_style_label=record.get(
+                            "position_style_label",
+                            pos.get("position_style_label", "단타"),
+                        ),
+                        risk_profile=record.get(
+                            "risk_profile", pos.get("risk_profile", "balanced")
+                        ),
                         score=pos.get("score", 0),
                         avg_down_count=0,
                         add_count=0,
@@ -3271,6 +3341,16 @@ class AutoTradeBot:
                         exit_reason=record["exit_reason"],
                         strategy_type=pos.get("strategy_type", "standard"),
                         strategy_label=pos.get("strategy_label", "표준"),
+                        position_style=record.get(
+                            "position_style", pos.get("position_style", "short")
+                        ),
+                        position_style_label=record.get(
+                            "position_style_label",
+                            pos.get("position_style_label", "단타"),
+                        ),
+                        risk_profile=record.get(
+                            "risk_profile", pos.get("risk_profile", "balanced")
+                        ),
                         score=pos.get("score", 0),
                         avg_down_count=record["avg_down_count"],
                         add_count=record["add_count"],

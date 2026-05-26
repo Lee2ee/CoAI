@@ -188,6 +188,7 @@ export interface AutoBotPosition {
   strategy_label: string
   position_style: string
   position_style_label: string
+  risk_profile?: string
   avg_down_count: number
   add_count: number
   pyramid_count: number
@@ -207,6 +208,9 @@ export interface AutoBotTradeLog {
   score: number
   avg_down_count: number
   add_count: number
+  position_style?: string
+  position_style_label?: string
+  risk_profile?: string
 }
 
 export interface ScanResult {
@@ -273,6 +277,8 @@ export interface AutoBotSettings {
   market_type?: 'spot' | 'futures'
   leverage?: number
   margin_mode?: 'cross' | 'isolated'
+  // 자동 스타일 전환 허용 목록
+  allowed_styles?: string[]
 }
 
 export interface FuturesPosition {
@@ -382,6 +388,9 @@ export interface AutoBotTradeDB {
   exit_reason: string
   strategy_type: string
   strategy_label: string
+  position_style?: string
+  position_style_label?: string
+  risk_profile?: string
   score: number
   avg_down_count: number
   add_count: number

@@ -219,6 +219,10 @@ function SettingsModal({
       max_add: preset.max_add,
     }
     const adjusted = applyRiskAdj(base, form.risk_profile ?? 'balanced')
+    // 사용자가 켜놓은 물타기/추매/피라미딩은 스타일 전환 시에도 유지
+    if (form.auto_avg_down) adjusted.auto_avg_down = true
+    if (form.auto_add) adjusted.auto_add = true
+    if (form.pyramid_enabled) adjusted.pyramid_enabled = true
     setForm(f => ({ ...f, ...adjusted }))
   }
 
@@ -235,6 +239,10 @@ function SettingsModal({
       auto_add: preset.auto_add,
     }
     const adjusted = applyRiskAdj(base, profile)
+    // 사용자가 켜놓은 물타기/추매/피라미딩은 투자 성향 변경 시에도 유지
+    if (form.auto_avg_down) adjusted.auto_avg_down = true
+    if (form.auto_add) adjusted.auto_add = true
+    if (form.pyramid_enabled) adjusted.pyramid_enabled = true
     setForm(f => ({ ...f, risk_profile: profile, ...adjusted }))
   }
 
@@ -415,6 +423,41 @@ function SettingsModal({
             <div className={clsx('mt-2 rounded-lg border px-3 py-2 text-xs', currentMeta.border, 'bg-surface-700/50')}>
               <p className={clsx('font-medium', currentMeta.color)}>{currentMeta.desc}</p>
               <p className="text-slate-500 mt-0.5">거래량 기준: {(form.exchange_id ?? 'upbit') === 'upbit' ? currentMeta.volDesc : currentMeta.volDescUsdt}</p>
+            </div>
+            {/* 자동 전환 허용 스타일 */}
+            <div className="mt-3">
+              <p className="text-xs text-slate-500 mb-1.5 flex items-center gap-1">
+                자동 전환 허용
+                <Tooltip text="AI 시장 국면 감지가 매매 스타일을 자동 변경할 때 허용할 스타일만 선택하세요. 체크 해제된 스타일로는 자동 전환되지 않습니다." iconOnly />
+              </p>
+              <div className="flex gap-2 flex-wrap">
+                {STYLE_ORDER.map(key => {
+                  const meta = STYLE_META[key]
+                  const allowed: string[] = form.allowed_styles ?? ['scalping', 'short', 'mid', 'long']
+                  const checked = allowed.includes(key)
+                  const toggle = () => {
+                    const next = checked
+                      ? allowed.filter(s => s !== key)
+                      : [...allowed, key]
+                    // 최소 1개는 허용
+                    if (next.length === 0) return
+                    setForm(f => ({ ...f, allowed_styles: next }))
+                  }
+                  return (
+                    <label key={key} className="flex items-center gap-1 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={toggle}
+                        className="accent-brand-500"
+                      />
+                      <span className={clsx('text-xs', checked ? meta.color : 'text-slate-500')}>
+                        {STYLE_LABEL[key]}
+                      </span>
+                    </label>
+                  )
+                })}
+              </div>
             </div>
           </div>
 
@@ -861,6 +904,14 @@ function PositionCard({ pos, onClick, exchangeId }: { pos: AutoBotPosition; onCl
               {pos.position_style_label}
             </span>
           )}
+          {pos.risk_profile && (() => {
+            const rm = RISK_PROFILE_META[pos.risk_profile]
+            return rm ? (
+              <span className={clsx('text-xs px-1.5 py-0.5 rounded font-medium border', rm.badge, rm.border)}>
+                {rm.label}
+              </span>
+            ) : null
+          })()}
           {pos.avg_down_count > 0 && (
             <span className="text-xs bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded flex items-center gap-0.5">
               <TrendingDown size={10} /> 물타기 {pos.avg_down_count}회
@@ -1134,6 +1185,23 @@ function LogRow({ t, exchangeId }: { t: AutoBotTradeLog | AutoBotTradeDB; exchan
             {t.strategy_label}
           </span>
         )}
+        {t.position_style_label && (
+          <span className={clsx(
+            'px-1.5 py-0.5 rounded font-medium border',
+            STYLE_META[t.position_style ?? '']?.badge ?? 'bg-surface-600 text-slate-400',
+            STYLE_META[t.position_style ?? '']?.border ?? 'border-surface-500',
+          )}>
+            {t.position_style_label}
+          </span>
+        )}
+        {t.risk_profile && (() => {
+          const rm = RISK_PROFILE_META[t.risk_profile]
+          return rm ? (
+            <span className={clsx('px-1.5 py-0.5 rounded font-medium border', rm.badge, rm.border)}>
+              {rm.label}
+            </span>
+          ) : null
+        })()}
         <span className={clsx('px-1.5 py-0.5 rounded font-medium', reasonColor)}>
           {reasonLabel}
         </span>
@@ -1718,6 +1786,7 @@ export default function AutoTradePanel() {
               expectancy_pct: 0, max_drawdown_pct: 0, avg_win_pct: 0, avg_loss_pct: 0,
               win_rate: 0, best_trade_pct: 0, worst_trade_pct: 0, total_trades: 0,
             }}
+            trades={dbTrades && dbTrades.length > 0 ? dbTrades : status.trade_log}
             dailyPnlKrw={status.daily_pnl_krw ?? 0}
             maxDailyLossPct={status.settings.max_daily_loss_pct ?? 5}
             totalValueKrw={status.total_value_krw}
@@ -1982,11 +2051,16 @@ function AiLogEntry({ entry }: { entry: AiAnalysisLogEntry }) {
 
 // ─── 성과 분석 패널 ─────────────────────────────────────────────────────────
 
-function PerfRow({ label, value, color, sub }: { label: string; value: string; color?: 'up' | 'down' | 'neutral'; sub?: string }) {
+function PerfRow({ label, value, color, sub, tooltip }: { label: string; value: string; color?: 'up' | 'down' | 'neutral'; sub?: string; tooltip?: string }) {
   const vc = color === 'up' ? 'text-up' : color === 'down' ? 'text-down' : 'text-slate-200'
   return (
     <div className="flex items-center justify-between py-2 border-b border-surface-700 last:border-0 text-xs">
-      <span className="text-slate-400">{label}</span>
+      <span className="text-slate-400 flex items-center gap-1">
+        {label}
+        {tooltip && (
+          <Tooltip text={tooltip} iconOnly />
+        )}
+      </span>
       <div className="text-right">
         <span className={`font-semibold tabular-nums ${vc}`}>{value}</span>
         {sub && <span className="text-slate-500 ml-1.5">{sub}</span>}
@@ -1995,8 +2069,31 @@ function PerfRow({ label, value, color, sub }: { label: string; value: string; c
   )
 }
 
-function PerformancePanel({ perf, dailyPnlKrw, maxDailyLossPct, totalValueKrw, exchangeId }: {
+type TradeLike = { pnl_pct: number; position_style?: string; position_style_label?: string; risk_profile?: string }
+
+function calcBreakdown(trades: TradeLike[], groupBy: 'position_style' | 'risk_profile') {
+  const map: Record<string, { wins: number; total: number; pnl: number; label: string }> = {}
+  for (const t of trades) {
+    const key = t[groupBy] ?? 'unknown'
+    const label = groupBy === 'position_style'
+      ? (t.position_style_label ?? key)
+      : (RISK_PROFILE_META[key]?.label ?? key)
+    if (!map[key]) map[key] = { wins: 0, total: 0, pnl: 0, label }
+    map[key].total++
+    map[key].pnl = +(map[key].pnl + t.pnl_pct).toFixed(2)
+    if (t.pnl_pct > 0) map[key].wins++
+  }
+  return Object.entries(map).map(([key, v]) => ({
+    key, label: v.label,
+    total: v.total,
+    winRate: v.total > 0 ? Math.round(v.wins / v.total * 100) : 0,
+    avgPnl: v.total > 0 ? +(v.pnl / v.total).toFixed(2) : 0,
+  }))
+}
+
+function PerformancePanel({ perf, trades = [], dailyPnlKrw, maxDailyLossPct, totalValueKrw, exchangeId }: {
   perf: PerformanceStats
+  trades?: TradeLike[]
   dailyPnlKrw: number
   maxDailyLossPct: number
   totalValueKrw: number
@@ -2033,29 +2130,81 @@ function PerformancePanel({ perf, dailyPnlKrw, maxDailyLossPct, totalValueKrw, e
         <p className="text-xs text-slate-500 mb-1 font-medium">리스크 조정 수익</p>
         <PerfRow label="샤프 비율" value={perf.sharpe_ratio.toFixed(2)}
           color={perf.sharpe_ratio >= 1 ? 'up' : perf.sharpe_ratio >= 0 ? 'neutral' : 'down'}
-          sub="(≥1 양호)" />
+          sub="(≥1 양호)"
+          tooltip="수익률을 변동성(위험)으로 나눈 값입니다. 1 이상이면 감수한 리스크 대비 수익이 충분하다는 의미이고, 클수록 좋습니다." />
         <PerfRow label="소르티노 비율" value={perf.sortino_ratio.toFixed(2)}
           color={perf.sortino_ratio >= 1 ? 'up' : perf.sortino_ratio >= 0 ? 'neutral' : 'down'}
-          sub="(하방 리스크)" />
+          sub="(하방 리스크)"
+          tooltip="샤프 비율과 비슷하지만, 손실이 날 때의 변동성만 위험으로 계산합니다. 수익이 오르내리는 건 위험으로 보지 않으므로 하락 리스크를 더 정확히 반영합니다." />
         <PerfRow label="칼마 비율" value={perf.calmar_ratio.toFixed(2)}
           color={perf.calmar_ratio >= 1 ? 'up' : perf.calmar_ratio >= 0 ? 'neutral' : 'down'}
-          sub="(수익/MDD)" />
+          sub="(수익/MDD)"
+          tooltip="총 수익률을 최대 낙폭(MDD)으로 나눈 값입니다. 최악의 손실 구간 대비 얼마나 벌었는지를 나타내며, 1 이상이면 손실폭보다 수익이 더 크다는 뜻입니다." />
         <PerfRow label="프로핏 팩터" value={perf.profit_factor.toFixed(2)}
           color={perf.profit_factor >= 1.5 ? 'up' : perf.profit_factor >= 1 ? 'neutral' : 'down'}
-          sub="(≥1.5 양호)" />
+          sub="(≥1.5 양호)"
+          tooltip="전체 수익의 합 ÷ 전체 손실의 합입니다. 1.5이면 손실 1원당 수익이 1.5원이라는 의미로, 1보다 크면 수익이 손실보다 많습니다." />
       </div>
 
       {/* 거래 통계 */}
       <div>
         <p className="text-xs text-slate-500 mb-1 font-medium">거래 통계</p>
         <PerfRow label="기대값 (Expectancy)" value={`${perf.expectancy_pct >= 0 ? '+' : ''}${perf.expectancy_pct.toFixed(2)}%`}
-          color={perf.expectancy_pct >= 0 ? 'up' : 'down'} />
-        <PerfRow label="최대 낙폭 (MDD)" value={`-${perf.max_drawdown_pct.toFixed(2)}%`} color="down" />
-        <PerfRow label="평균 수익 거래" value={`+${perf.avg_win_pct.toFixed(2)}%`} color="up" />
-        <PerfRow label="평균 손실 거래" value={`${perf.avg_loss_pct.toFixed(2)}%`} color="down" />
-        <PerfRow label="최고 수익" value={`+${perf.best_trade_pct.toFixed(2)}%`} color="up" />
-        <PerfRow label="최대 손실" value={`${perf.worst_trade_pct.toFixed(2)}%`} color="down" />
+          color={perf.expectancy_pct >= 0 ? 'up' : 'down'}
+          tooltip="거래 1건당 기대되는 평균 수익률입니다. 승률과 평균 손익을 함께 반영하며, 양수면 장기적으로 수익이 쌓인다는 뜻입니다." />
+        <PerfRow label="최대 낙폭 (MDD)" value={`-${perf.max_drawdown_pct.toFixed(2)}%`} color="down"
+          tooltip="고점에서 저점까지 가장 크게 떨어진 낙폭입니다. 전략이 최악의 구간에서 얼마나 손실을 봤는지를 나타내며, 작을수록 안전합니다." />
+        <PerfRow label="평균 수익 거래" value={`+${perf.avg_win_pct.toFixed(2)}%`} color="up"
+          tooltip="수익이 난 거래들의 평균 수익률입니다." />
+        <PerfRow label="평균 손실 거래" value={`${perf.avg_loss_pct.toFixed(2)}%`} color="down"
+          tooltip="손실이 난 거래들의 평균 손실률입니다." />
+        <PerfRow label="최고 수익" value={`+${perf.best_trade_pct.toFixed(2)}%`} color="up"
+          tooltip="지금까지 가장 수익이 많이 난 단일 거래의 수익률입니다." />
+        <PerfRow label="최대 손실" value={`${perf.worst_trade_pct.toFixed(2)}%`} color="down"
+          tooltip="지금까지 가장 손실이 많이 난 단일 거래의 손실률입니다." />
       </div>
+
+      {/* 매매 스타일 / 투자 성향별 성과 */}
+      {trades.length > 0 && (() => {
+        const styleRows = calcBreakdown(trades, 'position_style')
+        const riskRows  = calcBreakdown(trades, 'risk_profile')
+        const headers = (
+          <div className="grid grid-cols-4 gap-1 text-slate-500 text-xs px-1 mb-1">
+            <span>구분</span><span className="text-right">거래</span>
+            <span className="text-right">승률</span><span className="text-right">평균손익</span>
+          </div>
+        )
+        const row = (key: string, label: string, total: number, winRate: number, avgPnl: number, badge: string) => (
+          <div key={key} className="grid grid-cols-4 gap-1 items-center py-1.5 border-b border-surface-700 last:border-0 text-xs px-1">
+            <span className={clsx('px-1.5 py-0.5 rounded font-medium w-fit', badge)}>{label}</span>
+            <span className="text-right text-slate-300 tabular-nums">{total}</span>
+            <span className={clsx('text-right tabular-nums font-semibold', winRate >= 50 ? 'text-up' : 'text-down')}>{winRate}%</span>
+            <span className={clsx('text-right tabular-nums font-semibold', avgPnl >= 0 ? 'text-up' : 'text-down')}>
+              {avgPnl >= 0 ? '+' : ''}{avgPnl.toFixed(2)}%
+            </span>
+          </div>
+        )
+        return (
+          <>
+            <div>
+              <p className="text-xs text-slate-500 mb-1 font-medium">매매 스타일별 성과</p>
+              <div className="bg-surface-700/50 rounded-lg p-2">
+                {headers}
+                {styleRows.map(r => row(r.key, r.label, r.total, r.winRate, r.avgPnl,
+                  STYLE_META[r.key]?.badge ?? 'bg-surface-600 text-slate-400'))}
+              </div>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 mb-1 font-medium">투자 성향별 성과</p>
+              <div className="bg-surface-700/50 rounded-lg p-2">
+                {headers}
+                {riskRows.map(r => row(r.key, r.label, r.total, r.winRate, r.avgPnl,
+                  RISK_PROFILE_META[r.key]?.badge ?? 'bg-surface-600 text-slate-400'))}
+              </div>
+            </div>
+          </>
+        )
+      })()}
     </div>
   )
 }
