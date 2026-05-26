@@ -655,7 +655,7 @@ export function FuturesPositionDetailModal({ pos, onClose, krwRate }: { pos: Fut
   const [currentPrice, setCurrentPrice] = useState(pos.current_price)
 
   const closeMut = useMutation({
-    mutationFn: () => api.post(`/auto-bot/position/${encodeURIComponent(pos.symbol)}/close`),
+    mutationFn: () => api.post(`/auto-bot/position/${pos.symbol.replace('/', '-')}/close`),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['auto-bot-status'] })
       onClose()

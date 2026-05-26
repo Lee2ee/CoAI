@@ -270,7 +270,7 @@ async def check_entry(
             f"리스크 평가: ATR {atr_pct:.1f}%로 변동성 {'높음' if atr_pct > 3 else ('보통' if atr_pct > 1.5 else '낮음')}, "
             f"ADX {adx:.0f}으로 추세 {'강함' if adx > 30 else ('보통' if adx > 20 else '약함(횡보)')}\n\n"
             f"JSON만 출력: "
-            f'{{"enter":true/false,"confidence":50-95,"risk":"low/mid/high","reason":"한국어 1문장"}}'
+            f'{{"enter":true/false,"confidence":50-95,"risk":"low/mid/high","reason":"순수 한글 1문장(한자 금지)"}}'
         )
         max_tok = 120
     else:
@@ -281,7 +281,7 @@ async def check_entry(
             f"Vol:{volume_ratio:.1f}x Change:{price_change_pct:+.1f}% "
             f"BB:{bb_pos:.2f} ATR:{atr_pct:.1f}% MTF:{mtf_trend}\n"
             f"Strategy:{strategy_type} Signals:{signals_str}\n"
-            f'Reply JSON only: {{"enter":true/false,"confidence":50-95,"risk":"low/mid/high","reason":"Korean"}}'
+            f'Reply JSON only: {{"enter":true/false,"confidence":50-95,"risk":"low/mid/high","reason":"Korean only no Kanji"}}'
         )
         max_tok = 100
 
@@ -343,7 +343,7 @@ async def choose_position_style(
     signals_str = ", ".join(signals[:4]) if signals else "없음"
     if _is_capable_model():
         prompt = (
-            f"암호화폐 포지션 매매 스타일을 결정하세요. JSON만 출력. reason은 한국어.\n"
+            f"암호화폐 포지션 매매 스타일을 결정하세요. JSON만 출력. reason은 순수 한글(한자 없이).\n"
             f"종목:{symbol} 전략:{strategy_type} RSI:{rsi:.0f} ADX:{adx:.0f} "
             f"MACD:{macd_direction} 거래량:{volume_ratio:.1f}x 점수:{score}\n"
             f"신호:{signals_str}\n"
@@ -354,7 +354,7 @@ async def choose_position_style(
             f"long=수주, 과매도 반등(RSI<35), 인내 필요\n"
             f"힌트: RSI<35→long/mid, RSI>60+MACD강세→scalping/short, ADX>30→mid, "
             f"거래량>2x→scalping, oversold_bounce→long/mid, golden_cross→mid\n"
-            f'{{"style":"scalping/short/mid/long","reason":"한국어 1문장"}}'
+            f'{{"style":"scalping/short/mid/long","reason":"순수 한글 1문장(한자 금지)"}}'
         )
     else:
         prompt = (
@@ -362,7 +362,7 @@ async def choose_position_style(
             f"Vol:{volume_ratio:.1f}x Strategy:{strategy_type}\n"
             f"Signals:{signals_str}\n"
             f"scalping=fast momentum, short=hours, mid=ADX>25 trend, long=RSI<35 oversold\n"
-            f'{{"style":"scalping/short/mid/long","reason":"Korean"}}'
+            f'{{"style":"scalping/short/mid/long","reason":"Korean only no Kanji"}}'
         )
 
     try:
@@ -420,30 +420,31 @@ async def detect_regime(
 
     if _is_capable_model():
         prompt = (
-            f"BTC 시장 국면을 분석하세요. JSON만 출력. reason은 한국어.\n\n"
+            f"BTC 시장 국면을 분석하세요. JSON만 출력. reason은 순수 한글(한자 없이).\n\n"
             f"[BTC 데이터]\n"
             f"최근 10봉 종가: {closes_str}\n"
             f"20봉 변화율: {change_20:+.1f}% | 5봉 변화율: {change_5:+.1f}%\n"
             f"RSI: {btc_rsi:.0f} | 거래량배율: {btc_volume_ratio:.1f}x | ADX: {btc_adx:.0f}({trend_strength})\n\n"
             f"[국면 정의]\n"
-            f"trending = 방향성 있는 강한 추세 (ADX>25, 가격 지속 상승/하락)\n"
-            f"ranging  = 횡보 박스권 (ADX<20, 가격 제한된 범위 내 등락)\n"
-            f"volatile = 방향성 없는 급등락 (변동성 크고 예측 어려움)\n\n"
+            f"uptrend   = 상승 추세 (ADX>25, 가격 지속 상승, RSI>50)\n"
+            f"downtrend = 하락 추세 (ADX>25, 가격 지속 하락, RSI<50)\n"
+            f"ranging   = 횡보 박스권 (ADX<20, 가격 제한된 범위 내 등락)\n"
+            f"volatile  = 방향성 없는 급등락 (변동성 크고 예측 어려움)\n\n"
             f"[추천 스타일]\n"
             f"scalping=단기 모멘텀, short=수시간 트렌드, mid=수일 추세, long=과매도 반등\n\n"
-            f"min_score_delta: trending→-5(완화), ranging→0, volatile→+5~10(강화)\n\n"
-            f'{{"regime":"trending/ranging/volatile","style":"scalping/short/mid/long",'
-            f'"min_score_delta":-10~10,"reason":"한국어 1문장"}}'
+            f"min_score_delta: uptrend/downtrend→-5(완화), ranging→0, volatile→+5~10(강화)\n\n"
+            f'{{"regime":"uptrend/downtrend/ranging/volatile","style":"scalping/short/mid/long",'
+            f'"min_score_delta":-10~10,"reason":"순수 한글 1문장(한자 금지)"}}'
         )
         max_tok = 120
     else:
         prompt = (
-            f"BTC market regime. JSON only. reason Korean.\n"
+            f"BTC market regime. JSON only. reason Korean only no Kanji.\n"
             f"Closes: {closes_str}\n"
             f"20bar:{change_20:+.1f}% RSI:{btc_rsi:.0f} Vol:{btc_volume_ratio:.1f}x ADX:{btc_adx:.0f}\n"
-            f"trending=directional, ranging=sideways, volatile=choppy\n"
-            f'{{"regime":"trending/ranging/volatile","style":"scalping/short/mid/long",'
-            f'"min_score_delta":-10to10,"reason":"Korean"}}'
+            f"uptrend=rising, downtrend=falling, ranging=sideways, volatile=choppy\n"
+            f'{{"regime":"uptrend/downtrend/ranging/volatile","style":"scalping/short/mid/long",'
+            f'"min_score_delta":-10to10,"reason":"Korean only no Kanji"}}'
         )
         max_tok = 100
 
@@ -456,8 +457,10 @@ async def detect_regime(
             "min_score_delta": max(-10, min(10, int(data.get("min_score_delta", 0)))),
             "reason":          _clean_reason(str(data.get("reason", ""))),
         }
-        # 유효성 검증
-        if result["regime"] not in ("trending", "ranging", "volatile"):
+        # 유효성 검증 ("trending" 은 이전 버전 AI 응답 호환으로 uptrend 로 매핑)
+        if result["regime"] == "trending":
+            result["regime"] = "uptrend"
+        if result["regime"] not in ("uptrend", "downtrend", "ranging", "volatile"):
             result["regime"] = "ranging"
         if result["style"] not in ("scalping", "short", "mid", "long"):
             result["style"] = "short"
@@ -499,12 +502,12 @@ async def analyze_losses(
         for t in recent_trades[:5]
     )
     prompt = (
-        f"Analyze losing crypto trades. Reply ONLY with JSON. reason must be in Korean.\n"
+        f"Analyze losing crypto trades. Reply ONLY with JSON. reason must be in Korean only no Kanji.\n"
         f"Losses: {trades_str}\n"
         f"Current: SL={current_settings.get('stop_loss_pct')}% "
         f"min_score={current_settings.get('min_score')}\n"
         f"Issues: SL_TOO_TIGHT, WRONG_STRATEGY, BAD_TIMING, MARKET_CONDITION\n"
-        f'{{"issue":"TYPE","sl_pct_delta":0-2.0,"min_score_delta":0-10,"reason":"한국어 1문장"}}'
+        f'{{"issue":"TYPE","sl_pct_delta":0-2.0,"min_score_delta":0-10,"reason":"순수 한글 1문장(한자 금지)"}}'
     )
 
     try:
@@ -564,7 +567,7 @@ async def check_exit(
         elif rsi > 75:
             reversal_hint = "⚠️ RSI 과열 구간 → 조정 가능성"
         prompt = (
-            f"보유 포지션 청산 타이밍을 판단하세요. JSON만 출력. reason은 한국어.\n\n"
+            f"보유 포지션 청산 타이밍을 판단하세요. JSON만 출력. reason은 순수 한글(한자 없이).\n\n"
             f"종목: {symbol} | 전략: {strategy_type}\n"
             f"현재 수익: {pnl_pct:+.1f}% | TP 진행률: {tp_progress}% | SL까지 여유: {sl_gap_pct:.1f}%\n"
             f"설정 SL: {sl_pct:.1f}% | 설정 TP: {tp_pct:.1f}%\n"
@@ -576,7 +579,7 @@ async def check_exit(
             f"- tighten_sl: 수익 일부 확보 필요, 반전 징조 있음 (SL을 손익분기점 위로 올림)\n"
             f"- close_now: 강한 반전 신호, RSI 과열+MACD 하락, TP 근접\n"
             f"원칙: 반전 신호 없으면 hold 선호. R:R={pnl_pct:.1f}%/{sl_pct:.1f}% 확보 상태.\n\n"
-            f'{{"action":"hold/tighten_sl/close_now","reason":"한국어 1문장"}}'
+            f'{{"action":"hold/tighten_sl/close_now","reason":"순수 한글 1문장(한자 금지)"}}'
         )
         max_tok = 100
     else:
@@ -585,7 +588,7 @@ async def check_exit(
             f"TP_prog:{tp_progress}% SL_gap:{sl_gap_pct:.1f}% Strategy:{strategy_type}\n"
             f"Signals:{signals_str}\n"
             f"hold=stay, tighten_sl=move SL up, close_now=exit\n"
-            f'{{"action":"hold/tighten_sl/close_now","reason":"Korean"}}'
+            f'{{"action":"hold/tighten_sl/close_now","reason":"Korean only no Kanji"}}'
         )
         max_tok = 80
 

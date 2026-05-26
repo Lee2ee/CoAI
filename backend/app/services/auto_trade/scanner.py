@@ -99,28 +99,28 @@ STYLE_SCORE_WEIGHTS: dict[str, dict[str, float]] = {
 # 같은 전략이라도 타임프레임이 다르면 적정 리스크 폭이 다름
 STRATEGY_STYLE_CONFIGS: dict[str, dict[str, dict]] = {
     "oversold_bounce": {
-        "scalping": {"sl_pct": 1.0,  "tp_pct": 2.5},   # 5분봉 — 타이트
-        "short":    {"sl_pct": 2.5,  "tp_pct": 7.0},
-        "mid":      {"sl_pct": 5.0,  "tp_pct": 15.0},
-        "long":     {"sl_pct": 10.0, "tp_pct": 30.0},
+        "scalping": {"sl_pct": 1.0,  "tp_pct": 2.0},
+        "short":    {"sl_pct": 2.5,  "tp_pct": 4.0},   # 7.0 → 4.0: 15m에서 실현 가능한 수준
+        "mid":      {"sl_pct": 5.0,  "tp_pct": 10.0},  # 15.0 → 10.0
+        "long":     {"sl_pct": 10.0, "tp_pct": 22.0},  # 30.0 → 22.0
     },
     "golden_cross": {
-        "scalping": {"sl_pct": 0.8,  "tp_pct": 2.0},   # 5분봉 골든크로스 — 작은 폭
-        "short":    {"sl_pct": 4.0,  "tp_pct": 10.0},
-        "mid":      {"sl_pct": 6.0,  "tp_pct": 20.0},
-        "long":     {"sl_pct": 12.0, "tp_pct": 36.0},
+        "scalping": {"sl_pct": 0.8,  "tp_pct": 1.8},
+        "short":    {"sl_pct": 3.0,  "tp_pct": 5.5},   # 4.0/10.0 → 3.0/5.5
+        "mid":      {"sl_pct": 5.0,  "tp_pct": 12.0},  # 6.0/20.0 → 5.0/12.0
+        "long":     {"sl_pct": 10.0, "tp_pct": 25.0},  # 12.0/36.0 → 10.0/25.0
     },
     "macd_momentum": {
-        "scalping": {"sl_pct": 0.8,  "tp_pct": 1.8},   # scalping 최적
-        "short":    {"sl_pct": 3.0,  "tp_pct": 9.0},
-        "mid":      {"sl_pct": 5.0,  "tp_pct": 16.0},
-        "long":     {"sl_pct": 11.0, "tp_pct": 32.0},
+        "scalping": {"sl_pct": 0.8,  "tp_pct": 1.6},
+        "short":    {"sl_pct": 2.5,  "tp_pct": 4.5},   # 3.0/9.0 → 2.5/4.5
+        "mid":      {"sl_pct": 4.5,  "tp_pct": 9.0},   # 5.0/16.0 → 4.5/9.0
+        "long":     {"sl_pct": 9.0,  "tp_pct": 20.0},  # 11.0/32.0 → 9.0/20.0
     },
     "volume_breakout": {
-        "scalping": {"sl_pct": 1.0,  "tp_pct": 2.5},
-        "short":    {"sl_pct": 3.5,  "tp_pct": 12.0},
-        "mid":      {"sl_pct": 5.5,  "tp_pct": 18.0},
-        "long":     {"sl_pct": 10.0, "tp_pct": 30.0},
+        "scalping": {"sl_pct": 1.0,  "tp_pct": 2.2},
+        "short":    {"sl_pct": 2.5,  "tp_pct": 5.0},   # 3.5/12.0 → 2.5/5.0
+        "mid":      {"sl_pct": 4.5,  "tp_pct": 10.0},  # 5.5/18.0 → 4.5/10.0
+        "long":     {"sl_pct": 8.0,  "tp_pct": 20.0},  # 10.0/30.0 → 8.0/20.0
     },
     "standard": {
         "scalping": {"sl_pct": None, "tp_pct": None},
@@ -471,6 +471,7 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
                 "volume_ratio": 0.0, "price_change_pct": 0.0,
                 "mtf_trend": "neutral", "mtf_confirmed": True,
                 "adx": 0.0, "mr_score": 0, "mr_signals": [], "bb_mid": 0.0, "bb_lower": 0.0,
+                "macd_direction": "neutral", "bb_pos": 0.5, "atr_pct": 1.0,
             }
 
         weights = STYLE_SCORE_WEIGHTS.get(style, STYLE_SCORE_WEIGHTS["short"])
@@ -650,12 +651,16 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
             strategy_type = "golden_cross"
         elif macd_cross and volume_breakout:
             strategy_type = "volume_breakout"
-        elif macd_cross:
+        elif macd_cross and rsi <= 65:
+            # RSI > 65: 이미 과매수 구간 — MACD 크로스라도 추격 진입 금지
             strategy_type = "macd_momentum"
+        elif macd_cross:
+            # RSI > 65 + MACD cross: 과매수 추격 진입 → standard로 분류 (SL/TP 기본값 사용)
+            strategy_type = "standard"
         elif volume_breakout and (above_ema20 or rsi_is_bounce):
             strategy_type = "volume_breakout"
-        elif macd_bull and adx_val >= 25 and ema_pts >= 12:
-            # 추세 지속: MACD 강세 구간 + 강한 추세 + EMA 정배열
+        elif macd_bull and adx_val >= 25 and ema_pts >= 12 and rsi <= 65:
+            # 추세 지속: MACD 강세 구간 + 강한 추세 + EMA 정배열 (과매수 제외)
             strategy_type = "macd_momentum"
         elif rsi_is_bounce:
             strategy_type = "oversold_bounce"
@@ -901,7 +906,7 @@ FUTURES_STRATEGY_STYLE_CONFIGS: dict[str, dict[str, dict]] = {
         "long":     {"sl_pct": 4.0,  "tp_pct": 13.0},
     },
     "futures_breakout": {        # BB/ATR 돌파 — 빠른 진입·청산
-        "scalping": {"sl_pct": 0.8,  "tp_pct": 2.0},
+        "scalping": {"sl_pct": 1.2,  "tp_pct": 3.0},
         "short":    {"sl_pct": 1.2,  "tp_pct": 3.5},
         "mid":      {"sl_pct": 2.0,  "tp_pct": 6.0},
         "long":     {"sl_pct": 3.5,  "tp_pct": 10.0},
@@ -942,6 +947,7 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
         "volume_ratio": 0.0, "price_change_pct": 0.0,
         "mtf_trend": "neutral", "mtf_confirmed": True,
         "adx": 0.0, "mr_score": 0, "mr_signals": [], "bb_mid": 0.0, "bb_lower": 0.0,
+        "macd_direction": "neutral", "bb_pos": 0.5, "atr_pct": 1.0,
     }
     if len(df) < 60:
         return _empty
@@ -1048,6 +1054,9 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
     # ── Strategy 2: futures_breakout ─────────────────────────────────────────
     def _breakout(side: str) -> tuple[int, list[str]]:
         sc = 0; sg: list[str] = []
+        # scalping: BB 돌파 단독은 신호 미약 — 거래량 확인 필수
+        if style == "scalping" and vol_ratio < 1.3:
+            return 0, []
         if side == "long":
             if bb_upper > 0 and price_now > bb_upper:
                 sc += 30; sg.append("BB 상단 돌파 ↑")
@@ -1114,8 +1123,16 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
         return (sc, sg) if sc >= 20 else (0, [])  # 최소 임계값 미달 → 무효
 
     # ── 최강 후보 선택 ────────────────────────────────────────────────────────
+    # scalping: futures_momentum 제외 (SL 0.9% < SOL 등 변동성 코인 ATR → 노이즈 손절 빈발)
+    #           futures_trend도 제외 (ADX 추세 신호는 5m봉에서 후발 진입 위험)
+    #           scalping은 futures_breakout 전용 (변동성 돌파 = 빠른 진입·청산에 최적)
+    _allowed_strats = (
+        [("futures_breakout", _breakout)]
+        if style == "scalping"
+        else [("futures_trend", _trend), ("futures_breakout", _breakout), ("futures_momentum", _momentum)]
+    )
     candidates: list[tuple[str, str, int, list[str]]] = []
-    for strat, fn in [("futures_trend", _trend), ("futures_breakout", _breakout), ("futures_momentum", _momentum)]:
+    for strat, fn in _allowed_strats:
         for side in ("long", "short"):
             sc, sg = fn(side)
             if sc > 0:

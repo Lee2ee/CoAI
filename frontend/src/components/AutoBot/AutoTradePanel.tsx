@@ -1328,7 +1328,7 @@ export default function AutoTradePanel() {
   const [showSettings, setShowSettings] = useState(false)
   const [selectedPos, setSelectedPos] = useState<AutoBotPosition | null>(null)
   const [selectedFuturesPos, setSelectedFuturesPos] = useState<FuturesPosition | null>(null)
-  const [tab, setTab] = useState<'positions' | 'scan' | 'log' | 'ai' | 'forecast' | 'perf'>('positions')
+  const [tab, setTab] = useState<'positions' | 'scan' | 'log' | 'ai' | 'perf'>('positions')
   const [showLiveModal, setShowLiveModal] = useState(false)
   const [confirmDialog, setConfirmDialog] = useState<{
     message: string
@@ -1857,7 +1857,6 @@ export default function AutoTradePanel() {
             ['scan', `스캔 결과 (${status.scan_results.length})`],
             ['log', `거래 내역 (${tradeStats?.total ?? status.total_trades})`],
             ['ai', `AI 활동 (${status.ai_analysis_log?.length ?? 0})`],
-            ['forecast', `예상 수익 (${status.forecast_log?.length ?? 0})`],
             ['perf', '성과 분석'],
           ] as const).map(([key, label]) => (
             <button
@@ -1929,10 +1928,6 @@ export default function AutoTradePanel() {
             providerLabel={aiConfig ? `${aiConfig.providers?.[aiConfig.provider]?.label ?? aiConfig.provider} / ${aiConfig.model}` : undefined}
             providerTier={aiConfig ? (aiConfig.providers?.[aiConfig.provider]?.tier ?? 'free') : undefined}
           />
-        )}
-
-        {tab === 'forecast' && (
-          <ForecastTab log={status.forecast_log ?? []} />
         )}
 
         {tab === 'perf' && (
@@ -2538,134 +2533,6 @@ function AiActivityLog({
   )
 }
 
-function ForecastTab({ log }: { log: AiAnalysisLogEntry[] }) {
-  if (log.length === 0) {
-    return (
-      <div className="py-8 text-center text-sm text-slate-500">
-        <TrendingUp size={24} className="mx-auto mb-2 text-slate-600" />
-        <p>아직 예상 수익 데이터가 없습니다.</p>
-        <p className="text-xs mt-1 text-slate-600">봇이 포지션에 진입하면 자동으로 기록됩니다.</p>
-      </div>
-    )
-  }
-
-  const fmtPct = (v: number, isMax: boolean) => isMax ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`
-  const periods: ('1d' | '1w' | '1m' | '1y')[] = ['1d', '1w', '1m', '1y']
-
-  const colHeaders: { key: string; label: string; tooltip: string }[] = [
-    {
-      key: 'ev',
-      label: '거래 EV',
-      tooltip: '거래 1건당 기대 수익률.\n(승률 × TP%) − (패률 × SL%) − 수수료\n양수면 장기적으로 수익, 음수면 손실 구조.',
-    },
-    {
-      key: '1d',
-      label: '1일 예상',
-      tooltip: '하루 동안 예상되는 누적 수익률.\n거래 EV × 하루 예상 거래 횟수 (선형 추정).',
-    },
-    {
-      key: '1w',
-      label: '1주 예상',
-      tooltip: '1주일(7일) 동안 예상되는 누적 수익률.\n거래 EV × 주간 예상 거래 횟수 (선형 추정).',
-    },
-    {
-      key: '1m',
-      label: '1달 예상',
-      tooltip: '1달(30일) 동안 예상되는 누적 수익률.\n거래 EV × 월간 예상 거래 횟수 (선형 추정).',
-    },
-    {
-      key: '1y',
-      label: '1년 예상',
-      tooltip: '1년(365일) 동안 예상되는 누적 수익률.\n거래 EV × 연간 예상 거래 횟수 (선형 추정).\n단순 참고치로 실제와 큰 차이가 날 수 있습니다.',
-    },
-    {
-      key: 'wr',
-      label: '승률',
-      tooltip: '최근 거래 이력 기반 실제 승률.\n거래 이력이 5건 미만이면 기본값 50% 적용.',
-    },
-  ]
-
-  return (
-    <div className="space-y-2">
-      <p className="text-xs text-slate-500">* 수수료 포함·선형 추정치. 복리 미적용. 실제 수익을 보장하지 않습니다.</p>
-
-      {/* 헤더 */}
-      <div className="grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto] gap-x-3 text-[10px] text-slate-500 px-3 py-1">
-        <span>종목 / 진입 시각</span>
-        {colHeaders.map(h => (
-          <Tooltip key={h.key} text={h.tooltip}>
-            <span className="text-right cursor-help underline decoration-dotted decoration-slate-600">{h.label}</span>
-          </Tooltip>
-        ))}
-      </div>
-
-      <div className="divide-y divide-surface-700">
-        {log.map((entry, i) => {
-          const fc = entry.forecast
-          const ev = entry.ev_per_trade ?? 0
-          const evPos = ev >= 0
-          const isDefaultWr = !entry.win_rate_basis || entry.win_rate_basis === 0
-          return (
-            <div key={i} className="grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto] gap-x-3 items-center px-3 py-2.5 text-xs hover:bg-surface-700/40 transition-colors">
-              <div>
-                <div className="flex items-center gap-1.5">
-                  <span className="font-mono text-slate-200 font-medium">{entry.symbol}</span>
-                  {entry.side && (
-                    <span className={clsx(
-                      'px-1 rounded font-bold text-[10px]',
-                      entry.side === 'long' ? 'bg-up/20 text-up' : 'bg-down/20 text-down'
-                    )}>
-                      {entry.side === 'long' ? '롱' : '숏'}
-                    </span>
-                  )}
-                  {entry.position_style && (
-                    <span className="px-1 rounded bg-surface-600 text-slate-400 text-[10px]">
-                      {STYLE_LABEL[entry.position_style] ?? entry.position_style}
-                    </span>
-                  )}
-                  {entry.leverage && entry.leverage > 1 && (
-                    <span className="px-1 rounded bg-amber-500/20 text-amber-300 font-semibold text-[10px]">{entry.leverage}x</span>
-                  )}
-                </div>
-                <div className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-1.5">
-                  <span>{entry.at}</span>
-                  <span className="text-slate-600">TP+{entry.tp_pct}% / SL-{entry.sl_pct}%</span>
-                  {entry.fee_pct !== undefined && (
-                    <span className="text-slate-600">수수료 {entry.fee_pct}%</span>
-                  )}
-                </div>
-              </div>
-
-              {/* 거래 EV */}
-              <span className={clsx('text-right tabular-nums font-semibold', evPos ? 'text-up' : 'text-down')}>
-                {evPos ? '+' : ''}{ev.toFixed(2)}%
-              </span>
-
-              {/* 1일~1년 */}
-              {fc ? periods.map(p => {
-                const val = fc[p]
-                const isMax = val >= 9999
-                return (
-                  <span key={p} className={clsx('text-right tabular-nums font-semibold', isMax ? 'text-slate-500' : val >= 0 ? 'text-up' : 'text-down')}>
-                    {fmtPct(val, isMax)}
-                  </span>
-                )
-              }) : periods.map(p => <span key={p} className="text-right text-slate-600">—</span>)}
-
-              {/* 승률 */}
-              <Tooltip text={isDefaultWr ? '거래 이력 5건 미만 — 기본값 50% 적용 중입니다.\n실거래가 쌓이면 실제 승률로 업데이트됩니다.' : `최근 ${entry.win_rate_basis}건 거래 기반 실제 승률`}>
-                <span className={clsx('text-right tabular-nums cursor-help', isDefaultWr ? 'text-slate-500' : 'text-slate-300')}>
-                  {entry.win_rate}%
-                  {isDefaultWr && <span className="text-slate-600 text-[9px] ml-0.5">(기본)</span>}
-                </span>
-              </Tooltip>
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
 
 function StatCard({ label, value, color, sub }: { label: string; value: string; color?: 'up' | 'down'; sub?: string }) {
   return (
