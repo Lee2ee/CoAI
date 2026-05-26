@@ -88,6 +88,9 @@ export interface BacktestRequest {
   fee_rate?: number
   walk_forward?: boolean
   n_splits?: number
+  monte_carlo?: boolean
+  monte_carlo_runs?: number
+  quant_sizing?: boolean
 }
 
 export interface BacktestResult {
@@ -103,6 +106,7 @@ export interface BacktestResult {
   timestamps: string[]
   trades: BacktestTrade[]
   walk_forward_results?: WalkForwardResult[]
+  monte_carlo_results?: Record<string, unknown>
   indicator_snapshot?: { label: string; current_value: number | string; operator: string; threshold: number | null }[]
 }
 
@@ -219,6 +223,15 @@ export interface ScanResult {
   strategy_label: string
   sl_pct: number | null
   tp_pct: number | null
+  quant_score?: number
+  final_entry_score?: number
+  edge_after_cost_pct?: number
+  expected_edge_pct?: number
+  volatility_scalar?: number
+  atr_pct?: number
+  realized_vol_pct?: number
+  momentum_20_pct?: number
+  momentum_50_pct?: number
   mtf_trend?: 'bullish' | 'bearish' | 'neutral'
   mtf_confirmed?: boolean
 }
@@ -247,6 +260,15 @@ export interface AutoBotSettings {
   ai_exit_assist: boolean
   max_daily_loss_pct: number
   max_portfolio_exposure_pct: number
+  quant_sizing_enabled?: boolean
+  min_position_size_pct?: number
+  max_position_size_pct?: number
+  risk_per_trade_pct?: number
+  min_edge_after_cost_pct?: number
+  min_rank_score?: number
+  expected_slippage_pct?: number
+  dynamic_sl_tp_enabled?: boolean
+  drawdown_throttle_enabled?: boolean
   // 피라미딩
   pyramid_enabled?: boolean
   pyramid_threshold_pct?: number

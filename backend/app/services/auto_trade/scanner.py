@@ -25,6 +25,7 @@ import logging
 import pandas_ta as ta
 import pandas as pd
 from ..exchange.connector import ExchangeConnector
+from ..quant.optimizer import calc_quant_features
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -616,6 +617,14 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         # ── 평균 회귀 점수 계산 ──────────────────────────────────────────
         mr_signals, mr_score, bb_mid, bb_lower = _score_mean_reversion(df)
 
+        # ── 퀀트 오버레이: 추세 모멘텀 + 변동성 페널티 ─────────────────────
+        quant = calc_quant_features(df, base_score=min(score, 100), style=style)
+        quant_score = int(quant["quant_score"])
+        if quant_score >= min(score, 100) + 10:
+            signals.append(f"퀀트 우호 (Q {quant_score}, vol×{quant['volatility_scalar']})")
+        elif quant_score <= min(score, 100) - 10:
+            signals.append(f"퀀트 경고 (Q {quant_score}, ATR {quant['atr_pct']}%)")
+
         # ── 전략 자동 분류 ──────────────────────────────────────────────────
         # 우선순위:
         #   1. RSI 강한 과매도 → oversold_bounce
@@ -708,6 +717,14 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
             "mr_signals":       mr_signals,
             "bb_mid":           round(bb_mid, 2),
             "bb_lower":         round(bb_lower, 2),
+            # 퀀트 오버레이
+            "quant_score":      quant_score,
+            "expected_edge_pct": quant["expected_edge_pct"],
+            "volatility_scalar": quant["volatility_scalar"],
+            "atr_pct":          quant["atr_pct"],
+            "realized_vol_pct": quant["realized_vol_pct"],
+            "momentum_20_pct":  quant["momentum_20_pct"],
+            "momentum_50_pct":  quant["momentum_50_pct"],
         }
 
     except Exception as e:
@@ -719,6 +736,9 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
             "volume_ratio": 0.0, "price_change_pct": 0.0,
             "mtf_trend": "neutral", "mtf_confirmed": True,
             "adx": 0.0, "mr_score": 0, "mr_signals": [], "bb_mid": 0.0, "bb_lower": 0.0,
+            "quant_score": 0, "expected_edge_pct": 0.0, "volatility_scalar": 1.0,
+            "atr_pct": 0.0, "realized_vol_pct": 0.0, "momentum_20_pct": 0.0,
+            "momentum_50_pct": 0.0,
         }
 
 

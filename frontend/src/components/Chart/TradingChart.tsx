@@ -251,7 +251,7 @@ export default function TradingChart({ symbol: externalSymbol, exchange = 'upbit
       const res = await api.get('/market/ohlcv', { params: { symbol, timeframe: tf, limit, exchange } })
       return res.data.data as OHLCVBar[]
     },
-    refetchInterval: 30_000,
+    refetchInterval: 10_000,
   })
   useEffect(() => { if (data) dataRef.current = data }, [data])
 
@@ -289,7 +289,7 @@ export default function TradingChart({ symbol: externalSymbol, exchange = 'upbit
   const { data: trades = [] } = useQuery<Trade[]>({
     queryKey: ['trades-chart', symbol],
     queryFn: async () => (await api.get('/trades/', { params: { symbol, limit: 200 } })).data,
-    refetchInterval: 15_000,
+    refetchInterval: 5_000,
   })
 
   // ── 봇 포지션 ─────────────────────────────────────────────────────────────
