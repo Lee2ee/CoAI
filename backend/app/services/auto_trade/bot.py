@@ -275,6 +275,18 @@ class AutoTradeBot:
             "downtrend_avg_down_mode": False,    # 하락장 시 신규 진입 차단 + 물타기 집중
             "correlation_threshold": 0.85,       # 종목 간 상관계수 진입 차단 임계값
             "mdd_limit_pct": 20.0,              # MDD 이 값(%) 초과 시 봇 자동 중지
+            "risk_filter_enabled": True,
+            "risk_per_trade_pct": 0.8,
+            "min_reward_risk_ratio": 2.0,
+            "min_net_reward_risk_ratio": 1.5,
+            "max_trade_cost_pct": 0.45,
+            "base_slippage_pct": 0.05,
+            "expected_spread_pct": 0.03,
+            "min_volume_ratio": 1.1,
+            "max_effective_leverage": 3,
+            "min_liquidation_buffer_pct": 3.0,
+            "max_adverse_funding_rate": 0.0005,
+            "max_abs_funding_rate": 0.002,
             # ── 부분 청산 (TODO 22) ────────────────────────────────────────────
             "partial_exit_enabled": False,      # 부분 청산 활성화
             "partial_exit_ratio": 0.4,          # TP 트리거 도달 시 청산 비율 (40%)
@@ -2011,6 +2023,165 @@ class AutoTradeBot:
         except Exception as e:
             logger.error(f"AutoBot: _enter_scalping_positions error: {e}", exc_info=True)
 
+    @staticmethod
+    def _float(value, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _estimate_trade_cost_pct(
+        self,
+        candidate: dict,
+        market_type: str,
+        side: str = "long",
+    ) -> dict:
+        atr_pct = self._float(candidate.get("atr_pct"), 0.0)
+        volume_ratio = self._float(candidate.get("volume_ratio"), 1.0)
+        base_slippage = self.settings.get("base_slippage_pct", 0.05)
+        spread_pct = self.settings.get("expected_spread_pct", 0.03)
+
+        volatility_slippage = min(0.25, max(0.0, atr_pct) * 0.03)
+        liquidity_slippage = 0.08 if volume_ratio < self.settings.get("min_volume_ratio", 1.1) else 0.0
+        slippage_pct = base_slippage + volatility_slippage + liquidity_slippage
+
+        if market_type == "futures":
+            exchange_id = self.settings.get("exchange_id", "binance")
+            fee_rate = FUTURES_FEE_RATES.get(exchange_id, FUTURES_FEE_RATE)
+        else:
+            fee_rate = self._broker.fee_rate
+        fee_pct = fee_rate * 2 * 100
+
+        funding_rate = self._float(candidate.get("funding_rate"), 0.0)
+        funding_cost_pct = 0.0
+        if market_type == "futures":
+            if side == "long" and funding_rate > 0:
+                funding_cost_pct = funding_rate * 100
+            elif side == "short" and funding_rate < 0:
+                funding_cost_pct = abs(funding_rate) * 100
+
+        cost_pct = fee_pct + (slippage_pct * 2) + spread_pct + funding_cost_pct
+        return {
+            "fee_pct": round(fee_pct, 4),
+            "slippage_pct": round(slippage_pct, 4),
+            "spread_pct": round(spread_pct, 4),
+            "funding_cost_pct": round(funding_cost_pct, 4),
+            "cost_pct": round(cost_pct, 4),
+        }
+
+    def _evaluate_entry_risk(
+        self,
+        candidate: dict,
+        price: float,
+        sl_pct: float,
+        tp_pct: float,
+        side: str = "long",
+        market_type: str = "spot",
+        leverage: int = 1,
+        liquidation_price: Optional[float] = None,
+    ) -> tuple[bool, dict]:
+        if not self.settings.get("risk_filter_enabled", True):
+            return True, {"reason": "risk filter disabled", "cost_pct": 0.0}
+
+        reasons: list[str] = []
+        min_rr = self.settings.get("min_reward_risk_ratio", 2.0)
+        min_net_rr = self.settings.get("min_net_reward_risk_ratio", 1.5)
+        cost = self._estimate_trade_cost_pct(candidate, market_type, side)
+        cost_pct = cost["cost_pct"]
+
+        if price <= 0:
+            reasons.append("missing price")
+        if sl_pct <= 0 or tp_pct <= 0:
+            reasons.append("missing SL/TP")
+        if cost_pct <= 0 or cost_pct > self.settings.get("max_trade_cost_pct", 0.45):
+            reasons.append(f"cost too high/unknown ({cost_pct:.2f}%)")
+
+        gross_rr = tp_pct / max(sl_pct, 0.01) if sl_pct > 0 else 0.0
+        net_reward = max(0.0, tp_pct - cost_pct)
+        net_risk = sl_pct + cost_pct
+        net_rr = net_reward / max(net_risk, 0.01)
+        if gross_rr < min_rr or net_rr < min_net_rr:
+            reasons.append(
+                f"RR below threshold (gross {gross_rr:.2f}/{min_rr:.2f}, net {net_rr:.2f}/{min_net_rr:.2f})"
+            )
+
+        atr_pct = self._float(candidate.get("atr_pct"), 0.0)
+        if atr_pct <= 0:
+            reasons.append("missing volatility")
+        elif sl_pct < atr_pct * 0.8 and candidate.get("strategy_type") != "mean_reversion":
+            reasons.append(f"SL too tight vs ATR ({sl_pct:.2f}% < {atr_pct:.2f}% ATR)")
+
+        volume_ratio = self._float(candidate.get("volume_ratio"), 0.0)
+        min_volume_ratio = self.settings.get("min_volume_ratio", 1.1)
+        if volume_ratio < min_volume_ratio and candidate.get("strategy_type") != "mean_reversion":
+            reasons.append(f"volume not confirmed ({volume_ratio:.2f}x)")
+
+        mtf_trend = candidate.get("mtf_trend", "neutral")
+        is_surge = (
+            self._float(candidate.get("volume_ratio"), 0.0) >= 3.0
+            and self._float(candidate.get("price_change_pct"), 0.0) >= 3.0
+        )
+        if side == "long" and mtf_trend == "bearish" and not is_surge:
+            reasons.append("higher timeframe bearish")
+        if side == "short" and mtf_trend == "bullish" and not is_surge:
+            reasons.append("higher timeframe bullish")
+
+        if market_type == "futures":
+            funding_rate = self._float(candidate.get("funding_rate"), 0.0)
+            max_abs_funding = self.settings.get("max_abs_funding_rate", 0.002)
+            max_adverse_funding = self.settings.get("max_adverse_funding_rate", 0.0005)
+            adverse_funding = (
+                funding_rate if side == "long" else -funding_rate
+            )
+            if abs(funding_rate) > max_abs_funding:
+                reasons.append(f"funding too extreme ({funding_rate * 100:.3f}%)")
+            if adverse_funding > max_adverse_funding:
+                reasons.append(f"adverse funding ({funding_rate * 100:.3f}%)")
+            max_leverage = int(self.settings.get("max_effective_leverage", 3))
+            if leverage > max_leverage:
+                reasons.append(f"leverage above cap ({leverage}x > {max_leverage}x)")
+            if liquidation_price and price > 0:
+                if side == "long":
+                    liq_distance = (price - liquidation_price) / price * 100
+                else:
+                    liq_distance = (liquidation_price - price) / price * 100
+                min_liq_distance = sl_pct + self.settings.get("min_liquidation_buffer_pct", 3.0)
+                if liq_distance <= min_liq_distance:
+                    reasons.append(
+                        f"liquidation too close ({liq_distance:.2f}% <= {min_liq_distance:.2f}%)"
+                    )
+
+        detail = {
+            **cost,
+            "reason": "; ".join(reasons) if reasons else "PASS",
+            "gross_rr": round(gross_rr, 4),
+            "net_rr": round(net_rr, 4),
+            "risk_pct": round(sl_pct + cost_pct, 4),
+            "side": side,
+            "leverage": leverage,
+            "score": candidate.get("score", 0),
+        }
+        return not reasons, detail
+
+    def _record_no_trade(self, symbol: str, detail: dict):
+        reason = detail.get("reason", "risk filter blocked")
+        log_entry = {
+            "at": datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+            "type": "entry_blocked",
+            "symbol": symbol,
+            "confidence": 0,
+            "reason": f"NO_TRADE: {reason}",
+            "score": detail.get("score", 0),
+            "side": detail.get("side"),
+            "leverage": detail.get("leverage"),
+        }
+        self._analysis_log.insert(0, log_entry)
+        if len(self._analysis_log) > 20:
+            self._analysis_log.pop()
+        logger.info(f"AutoBot NO_TRADE {symbol}: {reason}")
+
     def _choose_style_rules(self, candidate: dict) -> str:
         """
         종목별 규칙 기반 최적 매매 스타일 선택 (AI 없이도 동적 결정).
@@ -2078,9 +2249,33 @@ class AutoTradeBot:
             invest_krw = kelly_invest if kelly_invest else krw * strategy_size_pct / 100 * min(size_multiplier, 1.3)
             invest_krw = min(invest_krw, krw * 0.95)  # 잔고 95% 초과 금지
 
+            sl_pct = scan_result.get("sl_pct") or self.settings["stop_loss_pct"]
+            tp_pct = scan_result.get("tp_pct") or self.settings["take_profit_pct"]
+            risk_ok, risk_detail = self._evaluate_entry_risk(
+                candidate=scan_result,
+                price=price,
+                sl_pct=sl_pct,
+                tp_pct=tp_pct,
+                side="long",
+                market_type="spot",
+                leverage=1,
+            )
+            if not risk_ok:
+                self._record_no_trade(symbol, risk_detail)
+                return
+
+            risk_budget = total_value * self.settings.get("risk_per_trade_pct", 0.8) / 100
+            risk_cap = risk_budget / max(risk_detail.get("risk_pct", sl_pct) / 100, 0.001)
+            if risk_cap < invest_krw:
+                invest_krw = risk_cap
+
             min_invest = 5_000 if self._quote_currency == "KRW" else 5
             if invest_krw < min_invest:
-                logger.warning(f"AutoBot: {self._quote_currency} 부족 ({krw:,.0f}), 진입 불가")
+                risk_detail = {
+                    **risk_detail,
+                    "reason": f"risk-sized amount below minimum ({invest_krw:.2f} < {min_invest})",
+                }
+                self._record_no_trade(symbol, risk_detail)
                 return
 
             # ── 포트폴리오 리스크 체크 (일일 손실 한도 / 최대 노출) ──────
@@ -2098,9 +2293,6 @@ class AutoTradeBot:
             amount = invest_krw / price
             entry_order = self._broker.execute_market_order(symbol, "buy", amount, price)
 
-            # 전략별 손절/익절 (스캐너가 분류한 값 우선, 없으면 글로벌 설정)
-            sl_pct = scan_result.get("sl_pct") or self.settings["stop_loss_pct"]
-            tp_pct = scan_result.get("tp_pct") or self.settings["take_profit_pct"]
             sl = price * (1 - sl_pct / 100)
             tp = price * (1 + tp_pct / 100)
             now = datetime.now(KST).isoformat()
@@ -2134,6 +2326,10 @@ class AutoTradeBot:
                 # 메타
                 "entry_at": now,
                 "score": scan_result.get("score", 0),
+                "risk_reward_r": risk_detail.get("net_rr", 0.0),
+                "estimated_cost_pct": risk_detail.get("cost_pct", 0.0),
+                "risk_per_trade_pct": self.settings.get("risk_per_trade_pct", 0.8),
+                "risk_gate": risk_detail,
                 "signals": scan_result.get("signals", []),
                 "strategy_type": scan_result.get("strategy_type", "standard"),
                 "strategy_label": scan_result.get("strategy_label", "표준"),
@@ -2817,6 +3013,14 @@ class AutoTradeBot:
 
         usdt_balance = self._futures_broker.usdt_balance
         sl_pct = scan_result.get("sl_pct") or self.settings["stop_loss_pct"]
+        tp_pct = scan_result.get("tp_pct") or self.settings["take_profit_pct"]
+
+        max_effective_leverage = int(self.settings.get("max_effective_leverage", 3))
+        if leverage > max_effective_leverage:
+            logger.info(
+                f"AutoBot futures: leverage capped {leverage}x -> {max_effective_leverage}x"
+            )
+            leverage = max_effective_leverage
 
         # 레버리지 안전 상한 계산:
         #   제약 1 (SL): 청산가가 손절가 너머에 있어야 함 → 1/lev - MMR > sl_pct/100 + 0.5%
@@ -2833,14 +3037,48 @@ class AutoTradeBot:
             )
             leverage = max_safe_leverage
 
+        mmr = getattr(
+            self._futures_broker,
+            "mmr",
+            FUTURES_MMR.get(self.settings.get("exchange_id", "binance"), 0.005),
+        )
+        liq_move_pct = max(0.0, (1.0 / max(leverage, 1) - mmr) * 100)
+        estimated_liq = (
+            price * (1 - liq_move_pct / 100)
+            if side == "long"
+            else price * (1 + liq_move_pct / 100)
+        )
+        risk_ok, risk_detail = self._evaluate_entry_risk(
+            candidate=scan_result,
+            price=price,
+            sl_pct=sl_pct,
+            tp_pct=tp_pct,
+            side=side,
+            market_type="futures",
+            leverage=leverage,
+            liquidation_price=estimated_liq,
+        )
+        if not risk_ok:
+            self._record_no_trade(symbol, risk_detail)
+            return
+
         # position_size_pct: 잔고 대비 희망 증거금 비율 (사용자 설정)
         # 단, SL×레버리지 기반 리스크 상한(잔고 2% 손실)을 초과하지 않도록 캡 적용
         _pos_size_pct = self.settings.get("position_size_pct", 25.0)
         _desired = usdt_balance * _pos_size_pct / 100
-        _risk_cap = (0.02 * usdt_balance) / (sl_pct / 100 * leverage) if sl_pct > 0 and leverage > 0 else _desired
+        _risk_budget = usdt_balance * self.settings.get("risk_per_trade_pct", 0.8) / 100
+        _risk_cap = (
+            _risk_budget / (risk_detail.get("risk_pct", sl_pct) / 100 * leverage)
+            if sl_pct > 0 and leverage > 0
+            else _desired
+        )
         usdt_amount = round(min(_desired, _risk_cap, usdt_balance * 0.90), 4)
         if usdt_amount < 5:
-            logger.warning(f"AutoBot 선물: USDT 부족 ({usdt_balance:.2f} USDT, 필요 최소 5 USDT), 진입 불가")
+            risk_detail = {
+                **risk_detail,
+                "reason": f"risk-sized margin below minimum ({usdt_amount:.4f} < 5)",
+            }
+            self._record_no_trade(symbol, risk_detail)
             return
         logger.info(f"AutoBot 선물: {symbol} 포지션 크기={usdt_amount:.2f} USDT, leverage={leverage}x, sl={sl_pct}%")
 
@@ -2857,7 +3095,6 @@ class AutoTradeBot:
             return
 
         fp = self._futures_broker.positions[symbol]
-        tp_pct = scan_result.get("tp_pct") or self.settings["take_profit_pct"]
         sl_price = price * (1 - sl_pct / 100) if side == "long" else price * (1 + sl_pct / 100)
         tp_price = price * (1 + tp_pct / 100) if side == "long" else price * (1 - tp_pct / 100)
 
@@ -2883,6 +3120,10 @@ class AutoTradeBot:
             "breakeven_set":        False,
             "funding_rate":         scan_result.get("funding_rate", 0.0),
             "score":                scan_result["score"],
+            "risk_reward_r":        risk_detail.get("net_rr", 0.0),
+            "estimated_cost_pct":    risk_detail.get("cost_pct", 0.0),
+            "risk_per_trade_pct":   self.settings.get("risk_per_trade_pct", 0.8),
+            "risk_gate":            risk_detail,
             "signals":              scan_result.get("signals", []),
             "strategy_type":        scan_result.get("strategy_type", "standard"),
             "strategy_label":       scan_result.get("strategy_label", "표준"),
