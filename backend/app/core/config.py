@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     BINANCE_SECRET: str = ""
     BINANCE_FUTURES_TESTNET: bool = True   # 기본 테스트넷, 실거래 시 False
 
+    # Bybit Futures
+    BYBIT_API_KEY: str = ""
+    BYBIT_SECRET: str = ""
+    BYBIT_FUTURES_TESTNET: bool = True     # 기본 테스트넷, 실거래 시 False
+
     class Config:
         env_file = ".env"
 

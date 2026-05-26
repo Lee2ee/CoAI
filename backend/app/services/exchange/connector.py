@@ -253,7 +253,10 @@ class ExchangeConnector:
         return await self._exchange.cancel_order(order_id, symbol)
 
     async def close(self):
+        session = getattr(self._exchange, "session", None)
         await self._exchange.close()
+        if session is not None and not session.closed:
+            await session.close()
 
 
 class PaperBroker:
@@ -329,8 +332,17 @@ class PaperBroker:
         return total
 
 
-# ── 선물 수수료율 ─────────────────────────────────────────────────────────────
-FUTURES_FEE_RATE = 0.0004   # 0.04% per side (Binance Futures taker 기본)
+# ── 선물 거래소별 수수료율 / 유지증거금률 ────────────────────────────────────
+FUTURES_FEE_RATES: dict[str, float] = {
+    "binance": 0.0004,   # 0.04% taker (Binance USDT-M 기본)
+    "bybit":   0.00055,  # 0.055% taker (Bybit USDT Perpetual VIP0 기본)
+}
+FUTURES_MMR: dict[str, float] = {
+    "binance": 0.005,    # 0.5% (BTC 0.4%, 알트 0.5% — 알트 기준 근사)
+    "bybit":   0.005,    # 0.5% (BTC/ETH 0.5%, 소형 알트 더 높음)
+}
+# 하위 호환용 단일 상수 (Binance 기본값)
+FUTURES_FEE_RATE = FUTURES_FEE_RATES["binance"]
 
 
 class BinanceFuturesConnector:
@@ -437,7 +449,112 @@ class BinanceFuturesConnector:
         }
 
     async def close(self):
+        session = getattr(self._exchange, "session", None)
         await self._exchange.close()
+        if session is not None and not session.closed:
+            await session.close()
+
+
+class BybitFuturesConnector:
+    """
+    Bybit USDT Perpetual 선물 커넥터 (linear 카테고리).
+    BinanceFuturesConnector 와 동일한 인터페이스.
+    """
+
+    def __init__(self, api_key: str = "", secret: str = "", testnet: bool = False):
+        self._exchange = ccxt.bybit({
+            "apiKey":  api_key,
+            "secret":  secret,
+            "options": {"defaultType": "swap", "market": "linear"},
+            "enableRateLimit": True,
+            "timeout": REQUEST_TIMEOUT,
+        })
+        if testnet:
+            self._exchange.set_sandbox_mode(True)
+        self.testnet = testnet
+        _conn = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+        self._exchange.session = aiohttp.ClientSession(connector=_conn)
+
+    async def set_leverage(self, symbol: str, leverage: int) -> None:
+        await self._exchange.set_leverage(leverage, symbol)
+
+    async def set_margin_mode(self, symbol: str, mode: str) -> None:
+        try:
+            await self._exchange.set_margin_mode(mode, symbol)
+        except Exception:
+            pass
+
+    async def open_long(self, symbol: str, usdt_amount: float, leverage: int) -> dict:
+        mark_price = await self.get_mark_price(symbol)
+        qty = round((usdt_amount * leverage) / mark_price, 3)
+        return await self._exchange.create_market_buy_order(symbol, qty)
+
+    async def open_short(self, symbol: str, usdt_amount: float, leverage: int) -> dict:
+        mark_price = await self.get_mark_price(symbol)
+        qty = round((usdt_amount * leverage) / mark_price, 3)
+        return await self._exchange.create_market_sell_order(
+            symbol, qty, {"reduceOnly": False}
+        )
+
+    async def close_position(self, symbol: str, side: str, qty: float) -> dict:
+        if side == "long":
+            return await self._exchange.create_market_sell_order(
+                symbol, qty, {"reduceOnly": True}
+            )
+        return await self._exchange.create_market_buy_order(
+            symbol, qty, {"reduceOnly": True}
+        )
+
+    async def get_mark_price(self, symbol: str) -> float:
+        """Bybit linear ticker에서 마크가격 조회."""
+        ccxt_symbol = symbol.replace("/", "")
+        connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+        async with aiohttp.ClientSession(connector=connector) as session:
+            url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={ccxt_symbol}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                data = await resp.json()
+        items = (data.get("result") or {}).get("list") or []
+        if not items:
+            raise RuntimeError(f"Bybit linear ticker 조회 실패: {symbol}")
+        t = items[0]
+        return float(t.get("markPrice") or t["lastPrice"])
+
+    async def get_liquidation_price(self, symbol: str) -> Optional[float]:
+        try:
+            positions = await self._exchange.fetch_positions([symbol])
+            for p in positions:
+                if p["symbol"] == symbol and (p.get("contracts") or 0) > 0:
+                    return p.get("liquidationPrice")
+        except Exception:
+            pass
+        return None
+
+    async def get_funding_rate(self, symbol: str) -> float:
+        try:
+            info = await self._exchange.fetch_funding_rate(symbol)
+            return info.get("fundingRate", 0.0)
+        except Exception:
+            return 0.0
+
+    async def fetch_ohlcv(
+        self, symbol: str, timeframe: str = "1h", limit: int = 100
+    ) -> pd.DataFrame:
+        bars = await self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        if not bars:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df.set_index("timestamp", inplace=True)
+        return df.astype(float)
+
+    async def fetch_ticker(self, symbol: str) -> dict:
+        return await self._exchange.fetch_ticker(symbol)
+
+    async def close(self):
+        session = getattr(self._exchange, "session", None)
+        await self._exchange.close()
+        if session is not None and not session.closed:
+            await session.close()
 
 
 class FuturesPaperBroker:
@@ -449,10 +566,16 @@ class FuturesPaperBroker:
 
     SLIPPAGE_RATE = 0.0005  # 0.05% — 선물은 현물보다 spread 좁음
 
-    def __init__(self, initial_balance: float = 1_000.0):
+    def __init__(
+        self,
+        initial_balance: float = 1_000.0,
+        fee_rate: float = FUTURES_FEE_RATE,
+        mmr: float = 0.005,
+    ):
         self.usdt_balance: float = initial_balance
         self.positions: dict[str, dict] = {}   # symbol → position dict
-        self.fee_rate: float = FUTURES_FEE_RATE
+        self.fee_rate: float = fee_rate
+        self.mmr: float = mmr
         self._order_id = 0
 
     def _next_id(self) -> str:
@@ -480,12 +603,14 @@ class FuturesPaperBroker:
             )
         self.usdt_balance -= required
 
-        # 청산가 근사 (Isolated Margin, MMR=0.5%)
-        mmr = 0.005
-        liq_price = (
-            price * (1 - 1 / leverage + mmr) if side == "long"
-            else price * (1 + 1 / leverage - mmr)
-        )
+        # 청산가 (Isolated Margin, 진입수수료 반영)
+        # 청산 조건: 미실현손익 + (초기증거금 - 진입수수료) = contracts × liq × MMR
+        # 롱: liq = (entry×contracts - margin + fee) / (contracts×(1-MMR))
+        # 숏: liq = (entry×contracts + margin - fee) / (contracts×(1+MMR))
+        if side == "long":
+            liq_price = (price * contracts - usdt_amount + fee) / (contracts * (1 - self.mmr))
+        else:
+            liq_price = (price * contracts + usdt_amount - fee) / (contracts * (1 + self.mmr))
 
         self.positions[symbol] = {
             "side":              side,
@@ -544,9 +669,14 @@ class FuturesPaperBroker:
             return
         entry     = pos["entry_price"]
         contracts = pos["contracts"]
-        pos["unrealized_pnl"] = (
+        raw_pnl = (
             (mark_price - entry) * contracts if pos["side"] == "long"
             else (entry - mark_price) * contracts
+        )
+        # close_position 과 동일하게 왕복 수수료·펀딩비 차감
+        est_exit_fee = contracts * mark_price * self.fee_rate
+        pos["unrealized_pnl"] = (
+            raw_pnl - pos.get("entry_fee", 0) - est_exit_fee - pos.get("funding_paid", 0)
         )
 
     def apply_funding(self, symbol: str, funding_rate: float):

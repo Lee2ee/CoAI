@@ -22,6 +22,7 @@
 """
 import asyncio
 import logging
+import math
 import pandas_ta as ta
 import pandas as pd
 from ..exchange.connector import ExchangeConnector
@@ -98,28 +99,28 @@ STYLE_SCORE_WEIGHTS: dict[str, dict[str, float]] = {
 # 같은 전략이라도 타임프레임이 다르면 적정 리스크 폭이 다름
 STRATEGY_STYLE_CONFIGS: dict[str, dict[str, dict]] = {
     "oversold_bounce": {
-        "scalping": {"sl_pct": 1.0,  "tp_pct": 2.5},   # 5분봉 — 타이트
-        "short":    {"sl_pct": 2.5,  "tp_pct": 7.0},
-        "mid":      {"sl_pct": 5.0,  "tp_pct": 15.0},
-        "long":     {"sl_pct": 10.0, "tp_pct": 30.0},
+        "scalping": {"sl_pct": 1.0,  "tp_pct": 2.0},
+        "short":    {"sl_pct": 2.5,  "tp_pct": 4.0},   # 7.0 → 4.0: 15m에서 실현 가능한 수준
+        "mid":      {"sl_pct": 5.0,  "tp_pct": 10.0},  # 15.0 → 10.0
+        "long":     {"sl_pct": 10.0, "tp_pct": 22.0},  # 30.0 → 22.0
     },
     "golden_cross": {
-        "scalping": {"sl_pct": 0.8,  "tp_pct": 2.0},   # 5분봉 골든크로스 — 작은 폭
-        "short":    {"sl_pct": 4.0,  "tp_pct": 10.0},
-        "mid":      {"sl_pct": 6.0,  "tp_pct": 20.0},
-        "long":     {"sl_pct": 12.0, "tp_pct": 36.0},
+        "scalping": {"sl_pct": 0.8,  "tp_pct": 1.8},
+        "short":    {"sl_pct": 3.0,  "tp_pct": 5.5},   # 4.0/10.0 → 3.0/5.5
+        "mid":      {"sl_pct": 5.0,  "tp_pct": 12.0},  # 6.0/20.0 → 5.0/12.0
+        "long":     {"sl_pct": 10.0, "tp_pct": 25.0},  # 12.0/36.0 → 10.0/25.0
     },
     "macd_momentum": {
-        "scalping": {"sl_pct": 0.8,  "tp_pct": 1.8},   # scalping 최적
-        "short":    {"sl_pct": 3.0,  "tp_pct": 9.0},
-        "mid":      {"sl_pct": 5.0,  "tp_pct": 16.0},
-        "long":     {"sl_pct": 11.0, "tp_pct": 32.0},
+        "scalping": {"sl_pct": 0.8,  "tp_pct": 1.6},
+        "short":    {"sl_pct": 2.5,  "tp_pct": 4.5},   # 3.0/9.0 → 2.5/4.5
+        "mid":      {"sl_pct": 4.5,  "tp_pct": 9.0},   # 5.0/16.0 → 4.5/9.0
+        "long":     {"sl_pct": 9.0,  "tp_pct": 20.0},  # 11.0/32.0 → 9.0/20.0
     },
     "volume_breakout": {
-        "scalping": {"sl_pct": 1.0,  "tp_pct": 2.5},
-        "short":    {"sl_pct": 3.5,  "tp_pct": 12.0},
-        "mid":      {"sl_pct": 5.5,  "tp_pct": 18.0},
-        "long":     {"sl_pct": 10.0, "tp_pct": 30.0},
+        "scalping": {"sl_pct": 1.0,  "tp_pct": 2.2},
+        "short":    {"sl_pct": 2.5,  "tp_pct": 5.0},   # 3.5/12.0 → 2.5/5.0
+        "mid":      {"sl_pct": 4.5,  "tp_pct": 10.0},  # 5.5/18.0 → 4.5/10.0
+        "long":     {"sl_pct": 8.0,  "tp_pct": 20.0},  # 10.0/30.0 → 8.0/20.0
     },
     "standard": {
         "scalping": {"sl_pct": None, "tp_pct": None},
@@ -388,6 +389,8 @@ def _score_mean_reversion(df: pd.DataFrame) -> tuple[list[str], int, float, floa
             bbm = float(bb[cols[1]].iloc[-1])
             bbu = float(bb[cols[2]].iloc[-1])
             price = float(close.iloc[-1])
+            if math.isnan(bbl) or math.isnan(bbm) or math.isnan(bbu):
+                raise ValueError("BB NaN")
             bb_mid = bbm
             bb_lower = bbl
             if bbu > bbl:
@@ -468,6 +471,7 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
                 "volume_ratio": 0.0, "price_change_pct": 0.0,
                 "mtf_trend": "neutral", "mtf_confirmed": True,
                 "adx": 0.0, "mr_score": 0, "mr_signals": [], "bb_mid": 0.0, "bb_lower": 0.0,
+                "macd_direction": "neutral", "bb_pos": 0.5, "atr_pct": 1.0,
             }
 
         weights = STYLE_SCORE_WEIGHTS.get(style, STYLE_SCORE_WEIGHTS["short"])
@@ -479,6 +483,8 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         # ── RSI (기본 30점, 가중치 적용) ────────────────────────────────────
         rsi_s = ta.rsi(close, length=14)
         rsi = float(rsi_s.iloc[-1]) if rsi_s is not None and not rsi_s.empty else 50.0
+        if math.isnan(rsi):
+            rsi = 50.0
 
         rsi_strong_oversold = False
         rsi_oversold = False
@@ -493,6 +499,9 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
             rsi_oversold = True
         elif 45 < rsi <= 55:
             rsi_pts = 5
+        elif 55 < rsi <= 70:
+            rsi_pts = 8
+            signals.append(f"RSI 상승 모멘텀 ({rsi:.1f})")
         score += int(rsi_pts * weights["rsi"])
 
         # ── EMA 추세 (기본 20점, 가중치 적용) ──────────────────────────────
@@ -524,6 +533,7 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         macd_cross = False
         macd_bull = False
         macd_pts = 0
+        macd_direction = "neutral"
         if macd_df is not None and len(macd_df.dropna()) >= 2:
             cols = macd_df.columns.tolist()
             ml_now  = float(macd_df[cols[0]].iloc[-1])
@@ -534,13 +544,20 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
                 macd_pts = 30
                 signals.append("MACD 골든크로스 ↑")
                 macd_cross = True
+                macd_direction = "cross_up"
             elif ml_now > sg_now:
                 macd_pts = 15
                 signals.append("MACD 강세 구간")
                 macd_bull = True
+                macd_direction = "bullish"
             elif ml_now > ml_prev:
                 macd_pts = 5
                 signals.append("MACD 반등 중")
+                macd_direction = "recovering"
+            elif ml_now < sg_now and ml_prev >= sg_prev:
+                macd_direction = "cross_down"
+            elif ml_now < sg_now:
+                macd_direction = "bearish"
         score += int(macd_pts * weights["macd"])
 
         # ── 거래량 (기본 20점, 가중치 적용) ────────────────────────────────
@@ -634,12 +651,16 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
             strategy_type = "golden_cross"
         elif macd_cross and volume_breakout:
             strategy_type = "volume_breakout"
-        elif macd_cross:
+        elif macd_cross and rsi <= 65:
+            # RSI > 65: 이미 과매수 구간 — MACD 크로스라도 추격 진입 금지
             strategy_type = "macd_momentum"
+        elif macd_cross:
+            # RSI > 65 + MACD cross: 과매수 추격 진입 → standard로 분류 (SL/TP 기본값 사용)
+            strategy_type = "standard"
         elif volume_breakout and (above_ema20 or rsi_is_bounce):
             strategy_type = "volume_breakout"
-        elif macd_bull and adx_val >= 25 and ema_pts >= 12:
-            # 추세 지속: MACD 강세 구간 + 강한 추세 + EMA 정배열
+        elif macd_bull and adx_val >= 25 and ema_pts >= 12 and rsi <= 65:
+            # 추세 지속: MACD 강세 구간 + 강한 추세 + EMA 정배열 (과매수 제외)
             strategy_type = "macd_momentum"
         elif rsi_is_bounce:
             strategy_type = "oversold_bounce"
@@ -654,16 +675,26 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         # ── ATR 기반 SL 하한 보정 ───────────────────────────────────────────
         # 고정 SL이 코인 변동성(ATR)보다 좁으면 정상 흔들림에 손절 발동.
         # sl_pct < 1.5 * ATR% 이면 ATR 기준으로 확대하고 TP도 2:1 R:R 유지.
+        atr_pct_val = 1.0
         try:
             atr_s = ta.atr(df["high"], df["low"], close, length=14)
             if atr_s is not None and not atr_s.empty:
-                atr_pct = float(atr_s.dropna().iloc[-1]) / current_price * 100
+                atr_pct_val = float(atr_s.dropna().iloc[-1]) / current_price * 100
+                atr_pct = atr_pct_val
                 if sl_pct is not None and sl_pct < atr_pct * 1.5:
                     sl_pct = round(atr_pct * 1.5, 2)
                     if tp_pct is not None:
                         tp_pct = max(tp_pct, round(sl_pct * 2.0, 2))
         except Exception:
             pass
+
+        # ── BB 포지션 (0=하단, 0.5=중간, 1=상단) ────────────────────────────
+        bb_pos_val = 0.5
+        if bb_mid > 0 and bb_lower > 0:
+            bb_upper_est = 2 * bb_mid - bb_lower
+            _p = float(close.iloc[-1])
+            if bb_upper_est > bb_lower:
+                bb_pos_val = round(max(0.0, min(1.0, (_p - bb_lower) / (bb_upper_est - bb_lower))), 2)
 
         # ── 멀티 타임프레임 추세 확인 (TODO: 멀티TF) ────────────────────────
         mtf_trend = "neutral"
@@ -708,6 +739,10 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
             "mr_signals":       mr_signals,
             "bb_mid":           round(bb_mid, 2),
             "bb_lower":         round(bb_lower, 2),
+            # AI 분석용 추가 지표
+            "macd_direction":   macd_direction,
+            "bb_pos":           bb_pos_val,
+            "atr_pct":          round(atr_pct_val, 2),
         }
 
     except Exception as e:
@@ -719,6 +754,7 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
             "volume_ratio": 0.0, "price_change_pct": 0.0,
             "mtf_trend": "neutral", "mtf_confirmed": True,
             "adx": 0.0, "mr_score": 0, "mr_signals": [], "bb_mid": 0.0, "bb_lower": 0.0,
+            "macd_direction": "neutral", "bb_pos": 0.5, "atr_pct": 1.0,
         }
 
 
@@ -808,43 +844,45 @@ async def scan_market(
     htf = HTF_MAP.get(timeframe, timeframe)
     results = []
 
-    symbols = await _fetch_dynamic_symbols(connector, style, exchange_id)
+    try:
+        symbols = await _fetch_dynamic_symbols(connector, style, exchange_id)
 
-    for symbol in symbols:
-        try:
-            df = await asyncio.wait_for(
-                connector.fetch_ohlcv(symbol, timeframe, limit=150),
-                timeout=12,
-            )
-            if len(df) < 60:
-                continue
-
-            daily_vol = _daily_volume_krw(df, timeframe)
-            if daily_vol < min_vol:
-                logger.debug(
-                    f"Skip {symbol}: 거래대금 {daily_vol/1e8:.0f}억 < 기준 {min_vol/1e8:.0f}억"
+        for symbol in symbols:
+            try:
+                df = await asyncio.wait_for(
+                    connector.fetch_ohlcv(symbol, timeframe, limit=150),
+                    timeout=12,
                 )
-                continue
+                if len(df) < 60:
+                    continue
 
-            # 멀티 타임프레임 확인 (HTF 가 주 TF와 다를 때만 추가 fetch)
-            htf_df = None
-            if htf != timeframe:
-                try:
-                    htf_df = await asyncio.wait_for(
-                        connector.fetch_ohlcv(symbol, htf, limit=60),
-                        timeout=12,
+                daily_vol = _daily_volume_krw(df, timeframe)
+                if daily_vol < min_vol:
+                    logger.debug(
+                        f"Skip {symbol}: 거래대금 {daily_vol/1e8:.0f}억 < 기준 {min_vol/1e8:.0f}억"
                     )
-                except Exception:
-                    pass  # HTF 실패 시 mtf_confirmed=True(기본) 유지
+                    continue
 
-            results.append(_score(df, symbol, style, htf_df=htf_df))
-            await asyncio.sleep(0.15)
-        except asyncio.TimeoutError:
-            logger.debug(f"Timeout scanning {symbol}")
-        except Exception as e:
-            logger.debug(f"Skip {symbol}: {e}")
+                # 멀티 타임프레임 확인 (HTF 가 주 TF와 다를 때만 추가 fetch)
+                htf_df = None
+                if htf != timeframe:
+                    try:
+                        htf_df = await asyncio.wait_for(
+                            connector.fetch_ohlcv(symbol, htf, limit=60),
+                            timeout=12,
+                        )
+                    except Exception:
+                        pass  # HTF 실패 시 mtf_confirmed=True(기본) 유지
 
-    await connector.close()
+                results.append(_score(df, symbol, style, htf_df=htf_df))
+                await asyncio.sleep(0.15)
+            except asyncio.TimeoutError:
+                logger.debug(f"Timeout scanning {symbol}")
+            except Exception as e:
+                logger.debug(f"Skip {symbol}: {e}")
+    finally:
+        await connector.close()
+
     results.sort(key=lambda x: x["score"], reverse=True)
     return results
 
@@ -868,7 +906,7 @@ FUTURES_STRATEGY_STYLE_CONFIGS: dict[str, dict[str, dict]] = {
         "long":     {"sl_pct": 4.0,  "tp_pct": 13.0},
     },
     "futures_breakout": {        # BB/ATR 돌파 — 빠른 진입·청산
-        "scalping": {"sl_pct": 0.8,  "tp_pct": 2.0},
+        "scalping": {"sl_pct": 1.2,  "tp_pct": 3.0},
         "short":    {"sl_pct": 1.2,  "tp_pct": 3.5},
         "mid":      {"sl_pct": 2.0,  "tp_pct": 6.0},
         "long":     {"sl_pct": 3.5,  "tp_pct": 10.0},
@@ -909,6 +947,7 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
         "volume_ratio": 0.0, "price_change_pct": 0.0,
         "mtf_trend": "neutral", "mtf_confirmed": True,
         "adx": 0.0, "mr_score": 0, "mr_signals": [], "bb_mid": 0.0, "bb_lower": 0.0,
+        "macd_direction": "neutral", "bb_pos": 0.5, "atr_pct": 1.0,
     }
     if len(df) < 60:
         return _empty
@@ -921,6 +960,8 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
     # ── 공통 지표 ────────────────────────────────────────────────────────────
     rsi_s = ta.rsi(close, length=14)
     rsi = float(rsi_s.iloc[-1]) if rsi_s is not None and not rsi_s.empty else 50.0
+    if math.isnan(rsi):
+        rsi = 50.0
 
     ema20  = ta.ema(close, length=20)
     ema50  = ta.ema(close, length=50)
@@ -954,9 +995,13 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
     bb_upper = bb_lower = bb_mid = 0.0
     if bb is not None and len(bb.dropna()) > 0:
         bc = bb.columns.tolist()
-        bb_lower = float(bb[bc[0]].iloc[-1])
-        bb_mid   = float(bb[bc[1]].iloc[-1])
-        bb_upper = float(bb[bc[2]].iloc[-1])
+        _bbl = float(bb[bc[0]].iloc[-1])
+        _bbm = float(bb[bc[1]].iloc[-1])
+        _bbu = float(bb[bc[2]].iloc[-1])
+        if not any(math.isnan(v) for v in [_bbl, _bbm, _bbu]):
+            bb_lower = _bbl
+            bb_mid   = _bbm
+            bb_upper = _bbu
 
     atr_s = ta.atr(high, low, close, length=14)
     atr = float(atr_s.iloc[-1]) if atr_s is not None and not atr_s.empty else 0.0
@@ -1009,6 +1054,9 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
     # ── Strategy 2: futures_breakout ─────────────────────────────────────────
     def _breakout(side: str) -> tuple[int, list[str]]:
         sc = 0; sg: list[str] = []
+        # scalping: BB 돌파 단독은 신호 미약 — 거래량 확인 필수
+        if style == "scalping" and vol_ratio < 1.3:
+            return 0, []
         if side == "long":
             if bb_upper > 0 and price_now > bb_upper:
                 sc += 30; sg.append("BB 상단 돌파 ↑")
@@ -1069,20 +1117,46 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
             sc += 20; sg.append(f"거래량 증가 ({vol_ratio:.1f}x)")
         elif vol_ratio >= 1.2:
             sc += 10; sg.append(f"거래량 소폭 증가 ({vol_ratio:.1f}x)")
+        elif vol_ratio >= 1.0:
+            sc += 5;  sg.append(f"거래량 보통 ({vol_ratio:.1f}x)")
 
         return (sc, sg) if sc >= 20 else (0, [])  # 최소 임계값 미달 → 무효
 
     # ── 최강 후보 선택 ────────────────────────────────────────────────────────
+    # scalping: futures_momentum 제외 (SL 0.9% < SOL 등 변동성 코인 ATR → 노이즈 손절 빈발)
+    #           futures_trend도 제외 (ADX 추세 신호는 5m봉에서 후발 진입 위험)
+    #           scalping은 futures_breakout 전용 (변동성 돌파 = 빠른 진입·청산에 최적)
+    _allowed_strats = (
+        [("futures_breakout", _breakout)]
+        if style == "scalping"
+        else [("futures_trend", _trend), ("futures_breakout", _breakout), ("futures_momentum", _momentum)]
+    )
     candidates: list[tuple[str, str, int, list[str]]] = []
-    for strat, fn in [("futures_trend", _trend), ("futures_breakout", _breakout), ("futures_momentum", _momentum)]:
+    for strat, fn in _allowed_strats:
         for side in ("long", "short"):
             sc, sg = fn(side)
             if sc > 0:
                 candidates.append((strat, side, sc, sg))
 
+    # ── 선물 공통 파생 지표 ────────────────────────────────────────────────
+    _f_macd_dir = (
+        "cross_up"   if crossed_up   else
+        "cross_down" if crossed_down else
+        "bullish"    if macd_line > signal_line else
+        "bearish"
+    )
+    _f_bb_pos = (
+        round(max(0.0, min(1.0, (price_now - bb_lower) / (bb_upper - bb_lower))), 2)
+        if bb_upper > bb_lower else 0.5
+    )
+    _f_atr_pct = round(atr / price_now * 100, 2) if price_now > 0 and atr > 0 else 1.0
+
     if not candidates:
-        return {**_empty, "rsi": rsi, "adx": adx, "volume_ratio": vol_ratio,
-                "bb_mid": bb_mid, "bb_lower": bb_lower, "price_change_pct": price_change_pct}
+        return {**_empty, "rsi": round(rsi, 1), "adx": round(adx, 1),
+                "volume_ratio": round(vol_ratio, 2),
+                "bb_mid": round(bb_mid, 2), "bb_lower": round(bb_lower, 2),
+                "price_change_pct": round(price_change_pct, 2),
+                "macd_direction": _f_macd_dir, "bb_pos": _f_bb_pos, "atr_pct": _f_atr_pct}
 
     strategy_type, side, score, signals = max(candidates, key=lambda x: x[2])
     cfg = FUTURES_STRATEGY_STYLE_CONFIGS.get(strategy_type, {}).get(style, {})
@@ -1090,7 +1164,7 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
     return {
         "symbol":           symbol,
         "score":            score,
-        "rsi":              rsi,
+        "rsi":              round(rsi, 1),
         "price":            current_price,
         "signals":          signals,
         "strategy_type":    strategy_type,
@@ -1099,15 +1173,19 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
         "tp_pct":           cfg.get("tp_pct"),
         "style":            style,
         "side":             side,
-        "volume_ratio":     vol_ratio,
-        "price_change_pct": price_change_pct,
+        "volume_ratio":     round(vol_ratio, 2),
+        "price_change_pct": round(price_change_pct, 2),
         "mtf_trend":        "bullish" if side == "long" else "bearish",
         "mtf_confirmed":    True,
-        "adx":              adx,
+        "adx":              round(adx, 1),
         "mr_score":         0,
         "mr_signals":       [],
-        "bb_mid":           bb_mid,
-        "bb_lower":         bb_lower,
+        "bb_mid":           round(bb_mid, 2),
+        "bb_lower":         round(bb_lower, 2),
+        # AI 분석용 추가 지표
+        "macd_direction":   _f_macd_dir,
+        "bb_pos":           _f_bb_pos,
+        "atr_pct":          _f_atr_pct,
     }
 
 
