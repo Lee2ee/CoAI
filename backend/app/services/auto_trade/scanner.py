@@ -1008,11 +1008,16 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
     atr_avg = float(atr_s.iloc[-14:-1].mean()) if atr_s is not None and len(atr_s) >= 14 else atr
     atr_expanding = atr > atr_avg * 1.2 if atr_avg > 0 else False
 
-    # iloc[-2]: 스팟 스캐너와 동일하게 확정된 직전봉 기준 사용
-    # Bybit API는 가장 최근 닫힌 봉(iloc[-1])의 volume을 아직 확정하지 않고 0으로 반환하는 경우가 있음
-    vol_avg   = float(volume.iloc[-22:-2].mean()) if len(volume) >= 22 else 1.0
-    vol_now   = float(volume.iloc[-2]) if len(volume) >= 2 else 0.0
-    vol_ratio = (vol_now / vol_avg) if vol_avg > 0 else 1.0
+    vol_avg = float(volume.iloc[-21:-1].mean()) if len(volume) >= 21 else 1.0
+    vol_now = float(volume.iloc[-1])
+    # Bybit API lag: 방금 닫힌 봉의 volume을 아직 확정하지 않고 0으로 반환하는 경우가 있음.
+    # vol_now=0이면 neutral(1.0) 처리 — 스코어 페널티 없이 보너스도 없음.
+    # vol_now=0을 그대로 두면 vol_ratio=0.0이 되어 volume 보너스를 못 받아
+    # 본래 60점 이상이었을 신호도 60 미만으로 떨어져 진입 차단됨.
+    if vol_avg > 0 and vol_now > 0:
+        vol_ratio = vol_now / vol_avg
+    else:
+        vol_ratio = 1.0  # neutral: no bonus, no penalty
     price_now = float(close.iloc[-1])
     price_change_pct = float((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100) if len(close) >= 2 else 0.0
 
