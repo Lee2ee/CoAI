@@ -88,8 +88,9 @@ class ExchangeConnector:
         # 일반 트레이딩 키로는 403이 나므로 currencies 조회를 비활성화.
         if exchange_id == "bybit":
             self._exchange.has["fetchCurrencies"] = False
-        # Windows에서 aiohttp 비동기 DNS 버그 → ThreadedResolver 적용 (upbit, binance 모두)
-        if exchange_id in ("upbit", "binance"):
+        # Windows에서 aiohttp 비동기 DNS 버그 → ThreadedResolver 적용
+        # Bybit도 포함: _fetch_bybit_ohlcv / _fetch_bybit_ticker 가 self._exchange.session 재사용
+        if exchange_id in ("upbit", "binance", "bybit"):
             _connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
             self._exchange.session = aiohttp.ClientSession(connector=_connector)
 
@@ -110,35 +111,35 @@ class ExchangeConnector:
         raw: list = []
         end_time: int | None = None
 
-        connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
-        async with aiohttp.ClientSession(connector=connector) as session:
-            while len(raw) < limit:
-                fetch_n = min(MAX_PER, limit - len(raw))
-                url = (
-                    f"https://api.bybit.com/v5/market/kline"
-                    f"?category=spot&symbol={ccxt_symbol}&interval={interval}&limit={fetch_n}"
-                )
-                if end_time is not None:
-                    url += f"&end={end_time}"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    data = await resp.json()
-                items = (data.get("result") or {}).get("list") or []
-                if not items:
-                    break
-                # Bybit 응답: 최신 봉이 먼저 → 역순 정렬
-                # [startTime, open, high, low, close, volume, turnover]
-                batch = [
-                    [int(row[0]), float(row[1]), float(row[2]),
-                     float(row[3]), float(row[4]), float(row[5])]
-                    for row in items
-                ]
-                batch.sort(key=lambda x: x[0])
-                raw = batch + raw
-                if len(items) < fetch_n:
-                    break
-                end_time = batch[0][0] - 1  # 이전 구간으로 이동
-                if end_time <= 0:
-                    break
+        # self._exchange.session 재사용 (ThreadedResolver 포함, 매 호출 세션 생성/파괴 방지)
+        session = self._exchange.session
+        while len(raw) < limit:
+            fetch_n = min(MAX_PER, limit - len(raw))
+            url = (
+                f"https://api.bybit.com/v5/market/kline"
+                f"?category=spot&symbol={ccxt_symbol}&interval={interval}&limit={fetch_n}"
+            )
+            if end_time is not None:
+                url += f"&end={end_time}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                data = await resp.json()
+            items = (data.get("result") or {}).get("list") or []
+            if not items:
+                break
+            # Bybit 응답: 최신 봉이 먼저 → 역순 정렬
+            # [startTime, open, high, low, close, volume, turnover]
+            batch = [
+                [int(row[0]), float(row[1]), float(row[2]),
+                 float(row[3]), float(row[4]), float(row[5])]
+                for row in items
+            ]
+            batch.sort(key=lambda x: x[0])
+            raw = batch + raw
+            if len(items) < fetch_n:
+                break
+            end_time = batch[0][0] - 1  # 이전 구간으로 이동
+            if end_time <= 0:
+                break
 
         raw = raw[-limit:]
         if not raw:
@@ -223,11 +224,11 @@ class ExchangeConnector:
 
     async def _fetch_bybit_ticker(self, symbol: str) -> dict:
         ccxt_symbol = symbol.replace("/", "")  # BTC/USDT → BTCUSDT
-        connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
-        async with aiohttp.ClientSession(connector=connector) as session:
-            url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={ccxt_symbol}"
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                data = await resp.json()
+        # self._exchange.session 재사용 (ThreadedResolver 포함)
+        session = self._exchange.session
+        url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={ccxt_symbol}"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            data = await resp.json()
         items = (data.get("result") or {}).get("list") or []
         if not items:
             raise RuntimeError(f"Bybit ticker 조회 실패: {data.get('retMsg', 'unknown')}")
@@ -499,6 +500,12 @@ class BybitFuturesConnector:
     BinanceFuturesConnector 와 동일한 인터페이스.
     """
 
+    # 타임프레임 → Bybit interval 변환 (spot 커넥터와 동일)
+    _BYBIT_INTERVAL = {
+        "1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
+        "1h": "60", "4h": "240", "1d": "D", "1w": "W", "1M": "M",
+    }
+
     def __init__(self, api_key: str = "", secret: str = "", testnet: bool = False):
         self._exchange = ccxt.bybit({
             "apiKey":  api_key,
@@ -546,11 +553,11 @@ class BybitFuturesConnector:
     async def get_mark_price(self, symbol: str) -> float:
         """Bybit linear ticker에서 마크가격 조회."""
         ccxt_symbol = symbol.replace("/", "")
-        connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
-        async with aiohttp.ClientSession(connector=connector) as session:
-            url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={ccxt_symbol}"
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                data = await resp.json()
+        url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={ccxt_symbol}"
+        # self._exchange.session 재사용 (ThreadedResolver 포함, 매 호출 세션 생성 방지)
+        session = self._exchange.session
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            data = await resp.json()
         items = (data.get("result") or {}).get("list") or []
         if not items:
             raise RuntimeError(f"Bybit linear ticker 조회 실패: {symbol}")
@@ -577,13 +584,40 @@ class BybitFuturesConnector:
     async def fetch_ohlcv(
         self, symbol: str, timeframe: str = "1h", limit: int = 100
     ) -> pd.DataFrame:
-        bars = await self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        if not bars:
+        # ccxt를 통하면 symbol resolution이 불확실(BTC/USDT vs BTC/USDT:USDT).
+        # 직접 v5/market/kline?category=linear 호출로 선물 데이터를 확실하게 조회.
+        interval = self._BYBIT_INTERVAL.get(timeframe, "60")
+        ccxt_symbol = symbol.replace("/", "")
+        url = (
+            f"https://api.bybit.com/v5/market/kline"
+            f"?category=linear&symbol={ccxt_symbol}&interval={interval}&limit={min(limit, 200)}"
+        )
+        session = self._exchange.session
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            data = await resp.json()
+        items = (data.get("result") or {}).get("list") or []
+        if not items:
             return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-        df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        # Bybit 응답: 최신 봉이 먼저 → 시간순 정렬
+        # [startTime, open, high, low, close, volume, turnover]
+        rows = sorted([
+            [int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])]
+            for r in items
+        ], key=lambda x: x[0])
+        df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         df.set_index("timestamp", inplace=True)
         return df.astype(float)
+
+    async def get_balance(self) -> dict:
+        """USDT 잔고 조회 (실거래 전환 시 사용)."""
+        bal = await self._exchange.fetch_balance()
+        usdt = bal.get("USDT", {})
+        return {
+            "total": usdt.get("total", 0.0),
+            "free":  usdt.get("free",  0.0),
+            "used":  usdt.get("used",  0.0),
+        }
 
     async def fetch_ticker(self, symbol: str) -> dict:
         return await self._exchange.fetch_ticker(symbol)
