@@ -7,7 +7,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { X, TrendingDown, TrendingUp, AlertTriangle } from 'lucide-react'
 import api from '../../utils/api'
-import type { AutoBotPosition, OHLCVBar } from '../../types'
+import type { AutoBotPosition, FuturesPosition, OHLCVBar } from '../../types'
 import clsx from 'clsx'
 import Tooltip from '../common/Tooltip'
 import ConfirmModal from '../common/ConfirmModal'
@@ -633,6 +633,385 @@ function InfoBox({
         {tooltip && <Tooltip text={tooltip} iconOnly />}
       </p>
       <p className={clsx('font-semibold font-mono text-xs', colorClass)}>{value}</p>
+    </div>
+  )
+}
+
+// ─── 선물 포지션 상세 모달 ────────────────────────────────────────────────────
+
+export function FuturesPositionDetailModal({ pos, onClose, krwRate }: { pos: FuturesPosition; onClose: () => void; krwRate: number | null }) {
+  const qc = useQueryClient()
+  const [showConfirm, setShowConfirm] = useState(false)
+  const [timeframe, setTimeframe] = useState('5m')
+  const timeframeRef = useRef('5m')
+  useEffect(() => { timeframeRef.current = timeframe }, [timeframe])
+
+  const containerRef = useRef<HTMLDivElement>(null)
+  const chartRef = useRef<IChartApi | null>(null)
+  const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const volRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+  const priceLinesRef = useRef<ReturnType<ISeriesApi<'Candlestick'>['createPriceLine']>[]>([])
+  const ohlcvRef = useRef<OHLCVBar[]>([])
+  const [currentPrice, setCurrentPrice] = useState(pos.current_price)
+
+  const closeMut = useMutation({
+    mutationFn: () => api.post(`/auto-bot/position/${pos.symbol.replace('/', '-')}/close`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['auto-bot-status'] })
+      onClose()
+    },
+  })
+
+  const isLong = pos.side === 'long'
+  const pnlPos = pos.unrealized_pnl_pct >= 0
+  const liqPct = pos.liquidation_price
+    ? Math.abs(pos.current_price - pos.liquidation_price) / pos.current_price * 100
+    : null
+  const liqDanger = liqPct !== null && liqPct < 10
+  const holdMin = Math.round((Date.now() - new Date(pos.entry_at).getTime()) / 60000)
+
+  // OHLCV 데이터 (Binance)
+  const { data: ohlcv } = useQuery<OHLCVBar[]>({
+    queryKey: ['ohlcv-futures-pos', pos.symbol, timeframe],
+    queryFn: async () => {
+      const res = await api.get('/market/ohlcv', {
+        params: { symbol: pos.symbol, timeframe, limit: 200, exchange: 'binance' },
+      })
+      return res.data.data
+    },
+    refetchInterval: 30_000,
+  })
+
+  // 차트 초기화
+  useEffect(() => {
+    if (!containerRef.current) return
+    const chart = createChart(containerRef.current, {
+      layout: { background: { type: ColorType.Solid, color: '#1e293b' }, textColor: '#94a3b8' },
+      grid: { vertLines: { color: '#334155' }, horzLines: { color: '#334155' } },
+      crosshair: { mode: 1 },
+      rightPriceScale: { borderColor: '#334155' },
+      timeScale: { borderColor: '#334155', timeVisible: true },
+      width: containerRef.current.clientWidth,
+      height: 320,
+    })
+    const candle = chart.addCandlestickSeries({
+      upColor: '#22c55e', downColor: '#ef4444',
+      borderUpColor: '#22c55e', borderDownColor: '#ef4444',
+      wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+      priceScaleId: 'right',
+    })
+    candle.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.22 } })
+    const vol = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol' })
+    vol.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } })
+
+    chartRef.current = chart
+    candleRef.current = candle
+    volRef.current = vol
+
+    const ro = new ResizeObserver(() => {
+      chart.applyOptions({ width: containerRef.current!.clientWidth })
+    })
+    ro.observe(containerRef.current)
+    return () => { ro.disconnect(); chart.remove() }
+  }, [])
+
+  // OHLCV + 가격 라인 업데이트
+  useEffect(() => {
+    if (!ohlcv || !candleRef.current || !chartRef.current) return
+    const candle = candleRef.current
+
+    candle.setData(ohlcv.map(b => ({
+      time: b.time as unknown as Time,
+      open: b.open, high: b.high, low: b.low, close: b.close,
+    })))
+    volRef.current?.setData(ohlcv.map(b => ({
+      time: b.time as unknown as Time,
+      value: b.volume,
+      color: b.close >= b.open ? '#22c55e40' : '#ef444440',
+    })))
+
+    // 진입 마커
+    const candleTimes = ohlcv.map(b => b.time)
+    const toUtcSec = (iso: string) =>
+      Math.floor(new Date(iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z').getTime() / 1000)
+    const entryTs = toUtcSec(pos.entry_at)
+    let snapped: number | null = null
+    for (const t of candleTimes) { if (t <= entryTs) snapped = t; else break }
+    if (snapped !== null) {
+      candle.setMarkers([{
+        time: snapped as unknown as Time,
+        position: isLong ? 'belowBar' : 'aboveBar',
+        color: isLong ? '#3b82f6' : '#ef4444',
+        shape: isLong ? 'arrowUp' : 'arrowDown',
+        text: `${isLong ? '롱' : '숏'} $${pos.entry_price.toFixed(4)}`,
+        size: 2,
+      }])
+    }
+
+    // 가격 라인: 진입가 / SL / TP / 청산가
+    priceLinesRef.current.forEach(pl => candle.removePriceLine(pl))
+    priceLinesRef.current = []
+    priceLinesRef.current.push(
+      candle.createPriceLine({ price: pos.entry_price, color: '#f59e0b', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '' }),
+      candle.createPriceLine({ price: pos.stop_loss_price, color: '#ef444480', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: '' }),
+    )
+    if (pos.take_profit_price < 1e15) {
+      priceLinesRef.current.push(
+        candle.createPriceLine({ price: pos.take_profit_price, color: '#22c55e80', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: '' }),
+      )
+    }
+    if (pos.liquidation_price) {
+      priceLinesRef.current.push(
+        candle.createPriceLine({ price: pos.liquidation_price, color: '#ff3b3b', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: '청산' }),
+      )
+    }
+    chartRef.current.timeScale().fitContent()
+  }, [ohlcv, pos])
+
+  useEffect(() => { if (ohlcv) ohlcvRef.current = ohlcv }, [ohlcv])
+
+  // WebSocket 실시간 시세 (Binance)
+  useEffect(() => {
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const url = `${proto}://${window.location.host}/ws/ticker?symbol=${encodeURIComponent(pos.symbol)}&exchange=binance`
+    const ws = new WebSocket(url)
+    const TIMEFRAME_SECONDS: Record<string, number> = {
+      '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
+      '1h': 3600, '4h': 14400, '1d': 86400,
+    }
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data)
+      if (msg.type !== 'ticker') return
+      setCurrentPrice(msg.last)
+      const bars = ohlcvRef.current
+      if (!candleRef.current || bars.length === 0) return
+      const period = TIMEFRAME_SECONDS[timeframeRef.current] ?? 300
+      const nowSec = Math.floor(Date.now() / 1000)
+      const candleStart = Math.floor(nowSec / period) * period
+      const last = bars[bars.length - 1]
+      if (candleStart > last.time) {
+        const newBar: OHLCVBar = { time: candleStart, open: msg.last, high: msg.last, low: msg.last, close: msg.last, volume: 0 }
+        ohlcvRef.current = [...bars, newBar]
+        candleRef.current.update({ time: candleStart as unknown as Time, open: msg.last, high: msg.last, low: msg.last, close: msg.last })
+        volRef.current?.update({ time: candleStart as unknown as Time, value: 0, color: '#22c55e40' })
+      } else {
+        const updated = { ...last, high: Math.max(last.high, msg.last), low: Math.min(last.low, msg.last), close: msg.last }
+        ohlcvRef.current = [...bars.slice(0, -1), updated]
+        candleRef.current.update({ time: last.time as unknown as Time, open: last.open, high: updated.high, low: updated.low, close: msg.last })
+        volRef.current?.update({ time: last.time as unknown as Time, value: last.volume, color: msg.last >= last.open ? '#22c55e40' : '#ef444440' })
+      }
+    }
+    ws.onerror = () => ws.close()
+    return () => ws.close()
+  }, [pos.symbol])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3" onClick={onClose}>
+      <div
+        className="bg-surface-800 border border-surface-700 rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* 헤더 */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-surface-700">
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-slate-100 text-base">{pos.symbol}</span>
+            <span className={clsx(
+              'text-xs px-1.5 py-0.5 rounded font-bold border',
+              isLong ? 'bg-up/20 border-up/40 text-up' : 'bg-down/20 border-down/40 text-down'
+            )}>
+              {isLong ? '롱' : '숏'} {pos.leverage}x
+            </span>
+            <span className="text-xs bg-surface-600 text-slate-400 px-1.5 py-0.5 rounded">
+              {pos.margin_mode === 'cross' ? 'Cross' : 'Isolated'}
+            </span>
+            {pos.position_style_label && (
+              <span className={clsx(
+                'text-xs px-1.5 py-0.5 rounded font-medium border',
+                POSITION_STYLE_META[pos.position_style ?? '']?.badge ?? 'bg-surface-600 text-slate-400',
+                POSITION_STYLE_META[pos.position_style ?? '']?.border ?? 'border-surface-500',
+              )}>
+                {pos.position_style_label}
+              </span>
+            )}
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-300 p-1">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-4">
+          {/* PnL 배너 */}
+          <div className={clsx(
+            'rounded-lg px-4 py-3 flex items-center justify-between',
+            pnlPos ? 'bg-up/10 border border-up/20' : 'bg-down/10 border border-down/20'
+          )}>
+            <div>
+              <p className="text-xs text-slate-400">미실현 손익</p>
+              <p className={clsx('text-xl font-bold font-mono tabular-nums', pnlPos ? 'text-up' : 'text-down')}>
+                {pnlPos ? '+' : ''}{pos.unrealized_pnl_usdt.toFixed(4)} USDT
+              </p>
+              {krwRate !== null && (
+                <p className={clsx('text-xs font-mono', pnlPos ? 'text-up/60' : 'text-down/60')}>
+                  ≈ ₩{Math.round(pos.unrealized_pnl_usdt * krwRate).toLocaleString('ko-KR')}
+                </p>
+              )}
+            </div>
+            <div className="text-right">
+              <p className="text-xs text-slate-400">수익률</p>
+              <p className={clsx('text-xl font-bold tabular-nums', pnlPos ? 'text-up' : 'text-down')}>
+                {pnlPos ? '+' : ''}{pos.unrealized_pnl_pct.toFixed(2)}%
+              </p>
+            </div>
+          </div>
+
+          {/* 가격 정보 */}
+          <div className="grid grid-cols-3 gap-2 text-xs">
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">진입가</p>
+              <p className="text-amber-400 font-mono font-semibold">${pos.entry_price.toFixed(4)}</p>
+            </div>
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">현재가</p>
+              <p className="text-slate-100 font-mono font-semibold">${currentPrice.toFixed(4)}</p>
+            </div>
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">수량</p>
+              <p className="text-slate-100 font-mono font-semibold">{pos.contracts.toFixed(4)}</p>
+            </div>
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">손절가</p>
+              <p className="text-down font-mono font-semibold">${pos.stop_loss_price.toFixed(4)}</p>
+            </div>
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">익절가</p>
+              <p className="text-up font-mono font-semibold">
+                {pos.take_profit_price === Infinity || pos.take_profit_price > 1e15
+                  ? '트레일링 중'
+                  : `$${pos.take_profit_price.toFixed(4)}`}
+              </p>
+            </div>
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">강제청산가</p>
+              <p className={clsx(
+                'font-mono font-semibold',
+                liqDanger ? 'text-red-400 animate-pulse' : 'text-slate-400'
+              )}>
+                {pos.liquidation_price ? `$${pos.liquidation_price.toFixed(4)}` : '—'}
+                {liqPct !== null && <span className="text-xs ml-1">({liqPct.toFixed(1)}%)</span>}
+              </p>
+            </div>
+          </div>
+
+          {/* 증거금 / 보유시간 */}
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">증거금</p>
+              <p className="text-slate-100 font-mono font-semibold">${pos.initial_margin.toFixed(2)}</p>
+              {krwRate !== null && (
+                <p className="text-slate-500 font-mono">≈ ₩{Math.round(pos.initial_margin * krwRate).toLocaleString('ko-KR')}</p>
+              )}
+            </div>
+            <div className="bg-surface-700 rounded px-2.5 py-2">
+              <p className="text-slate-500 mb-0.5">보유시간</p>
+              <p className="text-slate-100 font-mono font-semibold">{holdMin}분</p>
+            </div>
+          </div>
+
+          {/* 청산가 경고 */}
+          {liqDanger && (
+            <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-xs text-red-400">
+              <AlertTriangle size={14} />
+              강제청산가가 현재가와 매우 가깝습니다! 포지션 위험 상태
+            </div>
+          )}
+
+          {/* 펀딩비 */}
+          {pos.funding_rate !== 0 && (
+            <div className="flex items-center gap-2 text-xs bg-surface-700 rounded px-2.5 py-2">
+              <span className="text-slate-500">펀딩비</span>
+              <span className={pos.funding_rate > 0 ? 'text-amber-400' : 'text-up'}>
+                {(pos.funding_rate * 100).toFixed(4)}%
+              </span>
+              <span className="text-slate-500">({pos.funding_rate > 0 ? '롱 부담' : '숏 부담'})</span>
+            </div>
+          )}
+
+          {/* 전략 정보 */}
+          <div className="bg-surface-700 rounded-lg px-3 py-2.5 space-y-1.5">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-slate-400">전략</span>
+              <span className="text-brand-400 font-medium">{pos.strategy_label}</span>
+            </div>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-slate-400">진입 점수</span>
+              <span className={clsx(
+                'font-bold',
+                pos.score >= 70 ? 'text-up' : pos.score >= 50 ? 'text-amber-400' : 'text-slate-300'
+              )}>{pos.score}</span>
+            </div>
+            {pos.signals.length > 0 && (
+              <div className="flex flex-wrap gap-1 pt-0.5">
+                {pos.signals.map(s => (
+                  <span key={s} className="text-xs bg-surface-600 text-slate-400 px-1 py-0.5 rounded">{s}</span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* 차트 범례 + 타임프레임 */}
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex gap-3 text-xs text-slate-500 flex-wrap">
+              <span className="flex items-center gap-1">
+                <span style={{ color: isLong ? '#3b82f6' : '#ef4444' }}>{isLong ? '▲' : '▼'}</span>
+                {isLong ? '롱 진입' : '숏 진입'}
+              </span>
+              <span className="flex items-center gap-1"><span className="text-amber-400">- -</span> 진입가</span>
+              <span className="flex items-center gap-1"><span className="text-down">···</span> 손절가</span>
+              <span className="flex items-center gap-1"><span className="text-up">···</span> 익절가</span>
+              {pos.liquidation_price && (
+                <span className="flex items-center gap-1"><span className="text-red-500 font-bold">—</span> 강제청산가</span>
+              )}
+            </div>
+            <div className="flex gap-1">
+              {(['1m', '5m', '15m', '1h', '4h', '1d'] as const).map(tf => (
+                <button
+                  key={tf}
+                  onClick={() => setTimeframe(tf)}
+                  className={clsx(
+                    'px-2 py-0.5 rounded text-xs font-medium transition-colors',
+                    timeframe === tf ? 'bg-brand-500 text-white' : 'bg-surface-700 text-slate-400 hover:text-slate-200'
+                  )}
+                >
+                  {tf}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 차트 */}
+          <div ref={containerRef} className="rounded-lg overflow-hidden" />
+
+          {/* 수동 청산 버튼 */}
+          <button
+            onClick={() => setShowConfirm(true)}
+            disabled={closeMut.isPending}
+            className="w-full py-2.5 rounded-lg bg-red-500/20 border border-red-500/40 text-red-400 hover:bg-red-500/30 text-sm font-semibold transition-colors disabled:opacity-50"
+          >
+            {closeMut.isPending ? '청산 중...' : `수동 청산 (현재가 $${currentPrice.toFixed(4)})`}
+          </button>
+        </div>
+      </div>
+
+      {showConfirm && (
+        <ConfirmModal
+          message={`${pos.symbol} 포지션을 수동 청산하시겠습니까?`}
+          detail={`현재 손익: ${pnlPos ? '+' : ''}${pos.unrealized_pnl_pct.toFixed(2)}% (${pnlPos ? '+' : ''}${pos.unrealized_pnl_usdt.toFixed(4)} USDT)`}
+          confirmText="청산"
+          variant="danger"
+          onConfirm={() => { setShowConfirm(false); closeMut.mutate() }}
+          onClose={() => setShowConfirm(false)}
+        />
+      )}
     </div>
   )
 }

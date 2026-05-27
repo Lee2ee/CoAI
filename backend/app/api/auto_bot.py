@@ -1,3 +1,4 @@
+import math
 from typing import Optional
 from fastapi import APIRouter, Depends, BackgroundTasks, Body, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,9 +13,20 @@ from .deps import get_current_user
 router = APIRouter(prefix="/auto-bot", tags=["auto-bot"])
 
 
+def _sanitize(obj):
+    """NaN/Inf float 값을 None으로 치환 (JSON 직렬화 오류 방지)."""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    return obj
+
+
 @router.get("/status")
 async def bot_status(user: User = Depends(get_current_user)):
-    return get_auto_bot().get_status()
+    return _sanitize(get_auto_bot().get_status())
 
 
 @router.post("/start")
@@ -106,6 +118,40 @@ async def update_settings(
     return {"ok": True, "settings": bot.settings}
 
 
+@router.get("/spot-settings")
+async def get_spot_settings(user: User = Depends(get_current_user)):
+    """현물 전용 설정 조회"""
+    return get_auto_bot()._spot_settings
+
+
+@router.get("/futures-settings")
+async def get_futures_settings(user: User = Depends(get_current_user)):
+    """선물 전용 설정 조회"""
+    return get_auto_bot()._futures_settings
+
+
+@router.patch("/spot-settings")
+async def patch_spot_settings(
+    settings: dict,
+    user: User = Depends(get_current_user),
+):
+    """현물 전용 설정 업데이트 (활성 모드면 즉시 반영)"""
+    bot = get_auto_bot()
+    bot.update_mode_settings("spot", settings)
+    return {"ok": True, "settings": bot._spot_settings}
+
+
+@router.patch("/futures-settings")
+async def patch_futures_settings(
+    settings: dict,
+    user: User = Depends(get_current_user),
+):
+    """선물 전용 설정 업데이트 (활성 모드면 즉시 반영)"""
+    bot = get_auto_bot()
+    bot.update_mode_settings("futures", settings)
+    return {"ok": True, "settings": bot._futures_settings}
+
+
 @router.patch("/balance")
 async def set_paper_balance(
     body: dict = Body(...),
@@ -162,13 +208,15 @@ async def position_close(
 @router.get("/trades")
 async def get_trades(
     limit: int = Query(100, le=500),
+    is_paper: Optional[bool] = Query(None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """DB에 저장된 전체 거래 내역 (최신순)"""
-    result = await db.execute(
-        select(AutoBotTrade).order_by(AutoBotTrade.exit_at.desc()).limit(limit)
-    )
+    """DB에 저장된 전체 거래 내역 (최신순). is_paper=true/false로 필터링 가능."""
+    q = select(AutoBotTrade).order_by(AutoBotTrade.exit_at.desc()).limit(limit)
+    if is_paper is not None:
+        q = q.where(AutoBotTrade.is_paper == is_paper)
+    result = await db.execute(q)
     trades = result.scalars().all()
     return [
         {
@@ -192,6 +240,9 @@ async def get_trades(
             "entry_at": t.entry_at,
             "exit_at": t.exit_at or "",
             "is_paper": t.is_paper,
+            "market_type": t.market_type,
+            "side": t.side,
+            "leverage": t.leverage,
         }
         for t in trades
     ]
@@ -228,16 +279,20 @@ async def update_futures_settings(
 async def get_futures_positions(user: User = Depends(get_current_user)):
     """현재 선물 포지션 목록 (청산가·펀딩비·레버리지 포함)."""
     bot = get_auto_bot()
-    return list(bot._futures_positions.values())
+    return _sanitize(list(bot._futures_positions.values()))
 
 
 @router.get("/trades/stats")
 async def get_trade_stats(
+    is_paper: Optional[bool] = Query(None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """DB 기반 실현 손익 통계"""
-    result = await db.execute(select(AutoBotTrade))
+    """DB 기반 실현 손익 통계. is_paper=true/false로 필터링 가능."""
+    q = select(AutoBotTrade)
+    if is_paper is not None:
+        q = q.where(AutoBotTrade.is_paper == is_paper)
+    result = await db.execute(q)
     trades = result.scalars().all()
     if not trades:
         return {

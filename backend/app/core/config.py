@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 from functools import lru_cache
 
 
@@ -45,9 +46,21 @@ class Settings(BaseSettings):
     BINANCE_SECRET: str = ""
     BINANCE_FUTURES_TESTNET: bool = True   # 기본 테스트넷, 실거래 시 False
 
+    # Bybit Futures
+    BYBIT_API_KEY: str = ""
+    BYBIT_SECRET: str = ""
+    BYBIT_FUTURES_TESTNET: bool = True     # 기본 테스트넷, 실거래 시 False
+
     class Config:
         env_file = ".env"
         extra = "ignore"
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def parse_debug(cls, value):
+        if isinstance(value, str) and value.lower() in {"release", "prod", "production"}:
+            return False
+        return value
 
 
 @lru_cache()

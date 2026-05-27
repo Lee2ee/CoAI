@@ -88,9 +88,6 @@ export interface BacktestRequest {
   fee_rate?: number
   walk_forward?: boolean
   n_splits?: number
-  monte_carlo?: boolean
-  monte_carlo_runs?: number
-  quant_sizing?: boolean
 }
 
 export interface BacktestResult {
@@ -106,7 +103,6 @@ export interface BacktestResult {
   timestamps: string[]
   trades: BacktestTrade[]
   walk_forward_results?: WalkForwardResult[]
-  monte_carlo_results?: Record<string, unknown>
   indicator_snapshot?: { label: string; current_value: number | string; operator: string; threshold: number | null }[]
 }
 
@@ -211,6 +207,11 @@ export interface AutoBotTradeLog {
   position_style?: string
   position_style_label?: string
   risk_profile?: string
+  strategy_type?: string
+  strategy_label?: string
+  market_type?: 'spot' | 'futures'
+  side?: 'long' | 'short' | null
+  leverage?: number
 }
 
 export interface ScanResult {
@@ -223,17 +224,9 @@ export interface ScanResult {
   strategy_label: string
   sl_pct: number | null
   tp_pct: number | null
-  quant_score?: number
-  final_entry_score?: number
-  edge_after_cost_pct?: number
-  expected_edge_pct?: number
-  volatility_scalar?: number
-  atr_pct?: number
-  realized_vol_pct?: number
-  momentum_20_pct?: number
-  momentum_50_pct?: number
   mtf_trend?: 'bullish' | 'bearish' | 'neutral'
   mtf_confirmed?: boolean
+  side?: 'long' | 'short' | null
 }
 
 export interface AutoBotSettings {
@@ -260,15 +253,7 @@ export interface AutoBotSettings {
   ai_exit_assist: boolean
   max_daily_loss_pct: number
   max_portfolio_exposure_pct: number
-  quant_sizing_enabled?: boolean
-  min_position_size_pct?: number
-  max_position_size_pct?: number
-  risk_per_trade_pct?: number
-  min_edge_after_cost_pct?: number
-  min_rank_score?: number
-  expected_slippage_pct?: number
-  dynamic_sl_tp_enabled?: boolean
-  drawdown_throttle_enabled?: boolean
+  downtrend_avg_down_mode?: boolean
   // 피라미딩
   pyramid_enabled?: boolean
   pyramid_threshold_pct?: number
@@ -300,12 +285,14 @@ export interface FuturesPosition {
   signals: string[]
   strategy_type: string
   strategy_label: string
+  position_style?: string
+  position_style_label?: string
   entry_at: string
 }
 
 export interface AiAnalysisLogEntry {
   at: string
-  type: 'regime_change' | 'loss_analysis' | 'entry_blocked' | 'exit_action' | 'surge_override' | 'performance_feedback' | 'opportunistic_entry' | 'scalping_parallel'
+  type: 'regime_change' | 'loss_analysis' | 'entry_blocked' | 'exit_action' | 'surge_override' | 'performance_feedback' | 'opportunistic_entry' | 'scalping_parallel' | 'entry_forecast'
   regime?: string
   style?: string
   reason?: string
@@ -319,6 +306,17 @@ export interface AiAnalysisLogEntry {
   volume_ratio?: number
   price_change_pct?: number
   score?: number
+  // entry_forecast 전용
+  tp_pct?: number
+  sl_pct?: number
+  win_rate?: number
+  win_rate_basis?: number
+  fee_pct?: number
+  ev_per_trade?: number
+  position_style?: string
+  side?: 'long' | 'short'
+  leverage?: number
+  forecast?: { '1d': number; '1w': number; '1m': number; '1y': number }
 }
 
 export interface StylePreset {
@@ -348,6 +346,7 @@ export interface AutoBotStatus {
   trade_log: AutoBotTradeLog[]
   scan_results: ScanResult[]
   last_scan_at: string | null
+  quote_currency: 'KRW' | 'USDT'
   balance_krw: number
   fee_rate: number
   total_value_krw: number
@@ -368,6 +367,7 @@ export interface AutoBotStatus {
   }
   ai_consecutive_losses: number
   ai_analysis_log: AiAnalysisLogEntry[]
+  forecast_log: AiAnalysisLogEntry[]
   performance: PerformanceStats
   daily_pnl_krw: number
   // 선물 전용
@@ -397,6 +397,9 @@ export interface AutoBotTradeDB {
   entry_at: string
   exit_at: string
   is_paper: boolean
+  market_type?: 'spot' | 'futures'
+  side?: 'long' | 'short'
+  leverage?: number
 }
 
 export interface AutoBotTradeStats {

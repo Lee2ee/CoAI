@@ -82,6 +82,75 @@ async def ws_ticker(
         await connector.close()
 
 
+@router.websocket("/ws/tickers")
+async def ws_tickers(
+    websocket: WebSocket,
+    symbols: str = Query("BTC/KRW"),
+    exchange: str = Query("upbit"),
+):
+    """여러 심볼을 한 커넥션으로 폴링. symbols=BTC/KRW,ETH/KRW,... 형식."""
+    await websocket.accept()
+    symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    connector = ExchangeConnector(exchange_id=exchange, is_paper=True)
+
+    backoff = BACKOFF_MIN
+    last_error: str = ""
+
+    try:
+        while True:
+            error_sent = False
+            try:
+                tickers = await asyncio.wait_for(
+                    connector.fetch_tickers(symbol_list),
+                    timeout=10,
+                )
+            except asyncio.TimeoutError:
+                tickers = {}
+                err = f"{exchange} 요청 타임아웃"
+                if err != last_error:
+                    logger.warning(f"WS tickers timeout: {','.join(symbol_list)}@{exchange}")
+                    last_error = err
+                await websocket.send_json({"type": "error", "message": err, "backoff": backoff})
+                error_sent = True
+            except Exception as e:
+                tickers = {}
+                err = str(e).split("\n")[0][:120]
+                if err != last_error:
+                    logger.warning(f"WS tickers error ({exchange}): {err}")
+                    last_error = err
+                await websocket.send_json({"type": "error", "message": err, "backoff": backoff})
+                error_sent = True
+
+            successful = len(tickers)
+            for sym in symbol_list:
+                result = tickers.get(sym)
+                if not result:
+                    continue
+                await websocket.send_json({
+                    "type": "ticker",
+                    "symbol": sym,
+                    "last": result["last"],
+                    "bid": result.get("bid", 0),
+                    "ask": result.get("ask", 0),
+                    "change_pct": result.get("percentage") or 0,
+                    "volume": result.get("quoteVolume") or 0,
+                })
+            if successful == 0:
+                if not error_sent:
+                    await websocket.send_json({"type": "error", "message": f"{exchange} 시세 조회 실패"})
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * BACKOFF_MULT, BACKOFF_MAX)
+            else:
+                backoff = BACKOFF_MIN
+                last_error = ""
+                await asyncio.sleep(TICK_INTERVAL)
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await connector.close()
+
+
 @router.websocket("/ws/strategies")
 async def ws_strategies(websocket: WebSocket):
     await websocket.accept()
