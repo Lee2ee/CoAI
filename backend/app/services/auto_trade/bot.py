@@ -283,7 +283,7 @@ class AutoTradeBot:
             "base_slippage_pct": 0.05,
             "expected_spread_pct": 0.03,
             "min_volume_ratio": 0.5,  # 극저유동성만 차단 (volume은 스코어+비용에서 이미 반영)
-            "max_effective_leverage": 3,
+            "max_effective_leverage": 20,  # SL 기반 안전 상한이 실질적 제약 — 이 값은 절대 상한만 담당
             "min_liquidation_buffer_pct": 3.0,
             "max_adverse_funding_rate": 0.001,   # 0.1%/8h — 이 이상이면 hard block (net_rr로도 이미 반영됨)
             "max_abs_funding_rate": 0.003,        # 0.3%/8h — 극단적 펀딩 시 양방향 차단
@@ -2145,7 +2145,7 @@ class AutoTradeBot:
                 reasons.append(f"funding too extreme ({funding_rate * 100:.3f}%)")
             if adverse_funding > max_adverse_funding:
                 reasons.append(f"adverse funding ({funding_rate * 100:.3f}%)")
-            max_leverage = int(self.settings.get("max_effective_leverage", 3))
+            max_leverage = int(self.settings.get("max_effective_leverage", 20))
             if leverage > max_leverage:
                 reasons.append(f"leverage above cap ({leverage}x > {max_leverage}x)")
             if liquidation_price and price > 0:
@@ -3039,7 +3039,8 @@ class AutoTradeBot:
                 )
                 sl_pct = atr_min_sl
 
-        max_effective_leverage = int(self.settings.get("max_effective_leverage", 3))
+        # max_effective_leverage: 절대 상한 (기본 20). SL 기반 안전 계산이 실질적 제약.
+        max_effective_leverage = int(self.settings.get("max_effective_leverage", 20))
         if leverage > max_effective_leverage:
             logger.info(
                 f"AutoBot futures: leverage capped {leverage}x -> {max_effective_leverage}x"
