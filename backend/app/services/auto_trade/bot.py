@@ -57,8 +57,8 @@ TRADING_STYLE_PRESETS: dict[str, dict] = {
         "label": "단타",
         "timeframe": "15m",
         "scan_interval_min": 5,
-        "stop_loss_pct": 2.5,
-        "take_profit_pct": 3.5,    # 6.0 → 3.5: 15m봉 실현 가능한 수준
+        "stop_loss_pct": 1.5,
+        "take_profit_pct": 4.5,    # 손익비 3:1 확보
         "min_score": 48,
         "position_size_pct": 25.0,
         "max_positions": 4,
@@ -70,8 +70,8 @@ TRADING_STYLE_PRESETS: dict[str, dict] = {
         "max_add": 1,
         # 트레일링 스탑: 2% 이익 시 활성화 → 고점 대비 1% 하락 시 청산
         "trailing_stop": True,
-        "trailing_activate_pct": 2.0,  # 4.0 → 2.0
-        "trailing_pct": 1.0,           # 2.0 → 1.0
+        "trailing_activate_pct": 1.5,  # 이익 보전 더 빠르게
+        "trailing_pct": 0.8,           # 타이트한 트레일링
         # 최대 보유 시간: 단타 6시간
         "max_hold_hours": 6,
     },
@@ -248,8 +248,8 @@ class AutoTradeBot:
             "scan_interval_min": 5,
             "max_positions": 4,
             "position_size_pct": 25.0,
-            "stop_loss_pct": 2.5,
-            "take_profit_pct": 3.5,         # short 프리셋 기본값과 일치
+            "stop_loss_pct": 1.5,
+            "take_profit_pct": 4.5,         # 손익비 3:1
             "min_score": 48,
             "timeframe": "1h",
             # 물타기
@@ -262,8 +262,8 @@ class AutoTradeBot:
             "max_add": 1,
             # 트레일링 스탑
             "trailing_stop": True,
-            "trailing_activate_pct": 2.0,   # short 프리셋 기본값과 일치
-            "trailing_pct": 1.0,            # short 프리셋 기본값과 일치
+            "trailing_activate_pct": 1.5,   # 이익 보전 더 빠르게
+            "trailing_pct": 0.8,            # 타이트한 트레일링
             # AI 기능 개별 활성화
             "ai_entry_validation": True,   # 진입 신뢰도 AI 검증
             "ai_regime_detection": True,   # 시장 국면 자동 감지 + 스타일 조정
@@ -282,7 +282,7 @@ class AutoTradeBot:
             "max_trade_cost_pct": 0.45,
             "base_slippage_pct": 0.05,
             "expected_spread_pct": 0.03,
-            "min_volume_ratio": 0.5,  # 극저유동성만 차단 (volume은 스코어+비용에서 이미 반영)
+            "min_volume_ratio": 0,  # 거래량 체크 비활성화 (volume은 스코어에서 이미 반영)
             "max_effective_leverage": 20,  # SL 기반 안전 상한이 실질적 제약 — 이 값은 절대 상한만 담당
             "min_liquidation_buffer_pct": 3.0,
             "max_adverse_funding_rate": 0.001,   # 0.1%/8h — 이 이상이면 hard block (net_rr로도 이미 반영됨)
@@ -297,7 +297,7 @@ class AutoTradeBot:
             "max_pyramid": 2,              # 최대 횟수
             # ── 선물 거래 설정 ────────────────────────────────────────────────
             "market_type": "spot",         # "spot" | "futures"
-            "leverage": 5,                 # 레버리지 배수 (1~20)
+            "leverage": 8,                 # 레버리지 배수 (1~20)
             "margin_mode": "cross",        # "cross" | "isolated"
             # ── 자동 스타일 전환 허용 목록 ────────────────────────────────────
             "allowed_styles": ["scalping", "short", "mid", "long"],
@@ -2936,8 +2936,8 @@ class AutoTradeBot:
 
     async def _enter_futures_from_scan(self, scan_results: list[dict]):
         """선물 스캔 결과에서 신규 포지션 진입."""
-        # 선물은 레버리지 특성상 신호 품질을 더 엄격하게 적용 (최소 60점)
-        min_score = max(self.settings["min_score"], 60)
+        # 선물은 레버리지 특성상 신호 품질을 더 엄격하게 적용 (최소 55점)
+        min_score = max(self.settings["min_score"], 55)
         candidates = [
             r for r in scan_results
             if r["score"] >= min_score
