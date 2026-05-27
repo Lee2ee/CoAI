@@ -282,7 +282,7 @@ class AutoTradeBot:
             "max_trade_cost_pct": 0.45,
             "base_slippage_pct": 0.05,
             "expected_spread_pct": 0.03,
-            "min_volume_ratio": 1.1,
+            "min_volume_ratio": 0.5,  # 극저유동성만 차단 (volume은 스코어+비용에서 이미 반영)
             "max_effective_leverage": 3,
             "min_liquidation_buffer_pct": 3.0,
             "max_adverse_funding_rate": 0.0005,

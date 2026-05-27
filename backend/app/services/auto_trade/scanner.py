@@ -1008,10 +1008,11 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
     atr_avg = float(atr_s.iloc[-14:-1].mean()) if atr_s is not None and len(atr_s) >= 14 else atr
     atr_expanding = atr > atr_avg * 1.2 if atr_avg > 0 else False
 
-    vol_avg   = float(volume.iloc[-21:-1].mean()) if len(volume) >= 21 else 1.0
-    vol_now   = float(volume.iloc[-1])
-    # vol_now == 0 means missing/bad data from exchange — treat as neutral
-    vol_ratio = (vol_now / vol_avg) if (vol_avg > 0 and vol_now > 0) else 1.0
+    # iloc[-2]: 스팟 스캐너와 동일하게 확정된 직전봉 기준 사용
+    # Bybit API는 가장 최근 닫힌 봉(iloc[-1])의 volume을 아직 확정하지 않고 0으로 반환하는 경우가 있음
+    vol_avg   = float(volume.iloc[-22:-2].mean()) if len(volume) >= 22 else 1.0
+    vol_now   = float(volume.iloc[-2]) if len(volume) >= 2 else 0.0
+    vol_ratio = (vol_now / vol_avg) if vol_avg > 0 else 1.0
     price_now = float(close.iloc[-1])
     price_change_pct = float((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100) if len(close) >= 2 else 0.0
 
