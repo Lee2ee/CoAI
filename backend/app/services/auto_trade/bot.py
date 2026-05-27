@@ -2963,8 +2963,10 @@ class AutoTradeBot:
         # 만료된 블랙리스트 항목 정리
         self._reentry_blacklist = {s: t for s, t in self._reentry_blacklist.items() if t > _now_ft}
 
+        _pos_before = len(self._futures_positions)
+        _max_pos = self.settings["max_positions"]
         for candidate in candidates:
-            if len(self._futures_positions) >= self.settings["max_positions"]:
+            if len(self._futures_positions) >= _max_pos:
                 break
             # 재진입 금지 체크 (손절 후 2시간)
             if self._reentry_blacklist.get(candidate["symbol"], 0) > _now_ft:
@@ -2975,6 +2977,16 @@ class AutoTradeBot:
                 await asyncio.sleep(0.3)
             except Exception as e:
                 logger.error(f"AutoBot 선물 진입 오류 {candidate['symbol']}: {e}")
+
+        _entered = len(self._futures_positions) - _pos_before
+        _blocked = len(candidates) - _entered
+        logger.info(
+            f"AutoBot 선물 진입 사이클 완료: "
+            f"후보={len(candidates)}개 (점수≥{min_score}), "
+            f"진입성공={_entered}개, 차단/스킵={_blocked}개, "
+            f"현재포지션={len(self._futures_positions)}/{_max_pos} "
+            f"(전체 스캔={len(scan_results)}개 중 점수미달 {len(scan_results)-len(candidates)}개 제외)"
+        )
 
     async def _open_futures_position(self, scan_result: dict):
         """선물 포지션 개시 (모의 or 실거래)."""
