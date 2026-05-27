@@ -2939,31 +2939,13 @@ class AutoTradeBot:
             and r["symbol"] not in self._futures_positions
         ]
 
-        # 시장 국면과 반대 방향 진입 차단
-        # 상승장 → 숏 금지 / 하락장 → 롱 금지 (ranging/unknown 은 양방향 허용)
-        # 단, 개별 종목 점수 80 이상이면 강한 신호로 간주하여 허용 (국면 판단 오류 방어)
+        # 시장 국면 정보 로깅 (참고용)
+        # 하드블록 제거: 교착 상태 방지
+        # - min_score_delta가 이미 downtrend 시 진입기준 +15 강화
+        # - _evaluate_entry_risk의 MTF 체크가 개별 종목 방향을 필터링
+        # - regime 하드블록은 위 두 필터와 삼중 중복이며, 모든 종목이 개별 MTF와
+        #   regime이 일치하지 않을 때 롱/숏 모두 차단되는 교착 상태를 유발
         regime = self._current_regime.get("regime", "ranging")
-        if regime in ("uptrend", "downtrend"):
-            blocked_side = "short" if regime == "uptrend" else "long"
-            before = len(candidates)
-            regime_blocked = [c for c in candidates if c.get("side", "long") == blocked_side and c["score"] < 80]
-            candidates    = [c for c in candidates if c.get("side", "long") != blocked_side or c["score"] >= 80]
-            blocked = before - len(candidates)
-            if regime_blocked:
-                logger.info(
-                    f"AutoBot 선물 국면 필터: {regime} — {blocked_side} {blocked}개 진입 차단 "
-                    f"(점수 80 미만), 고점수 {before - len(regime_blocked) - sum(1 for c in candidates if c.get('side') != blocked_side)}개 허용"
-                )
-                for bc in regime_blocked:
-                    self._analysis_log.insert(0, {
-                        "at":         datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
-                        "type":       "entry_blocked",
-                        "symbol":     bc["symbol"],
-                        "confidence": 0,
-                        "reason":     f"NO_TRADE: 국면 필터 — {regime} (롱 차단, 점수 {bc['score']})",
-                    })
-                if len(self._analysis_log) > 20:
-                    self._analysis_log = self._analysis_log[:20]
 
         logger.info(
             f"AutoBot _enter_futures_from_scan: 전체={len(scan_results)}개, "
