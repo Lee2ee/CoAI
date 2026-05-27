@@ -1211,8 +1211,8 @@ class AutoTradeBot:
 
             btc_closes = [float(x) for x in btc_df["close"].tolist()]
             vol_series = btc_df["volume"]
-            vol_avg = float(vol_series.iloc[-21:-1].mean()) if len(vol_series) >= 21 else 1.0
-            vol_now  = float(vol_series.iloc[-1])
+            vol_avg = float(vol_series.iloc[-22:-2].mean()) if len(vol_series) >= 22 else 1.0
+            vol_now  = float(vol_series.iloc[-2]) if len(vol_series) >= 2 else 0.0
             btc_volume_ratio = round(vol_now / vol_avg, 2) if vol_avg > 0 else 1.0
 
             btc_rsi = self._calc_rsi(btc_closes)
@@ -1446,7 +1446,8 @@ class AutoTradeBot:
             if self._running and not self._paused:
                 import time as _st
                 if self._is_futures:
-                    if len(self._futures_positions) < self.settings["max_positions"]:
+                    if (len(self._futures_positions) < self.settings["max_positions"]
+                            and _st.time() >= self._cooldown_until):
                         await self._enter_futures_from_scan(results)
                 else:
                     if (len(self._positions) < self.settings["max_positions"]
@@ -2057,10 +2058,14 @@ class AutoTradeBot:
         funding_rate = self._float(candidate.get("funding_rate"), 0.0)
         funding_cost_pct = 0.0
         if market_type == "futures":
-            if side == "long" and funding_rate > 0:
-                funding_cost_pct = funding_rate * 100
-            elif side == "short" and funding_rate < 0:
-                funding_cost_pct = abs(funding_rate) * 100
+            # 보유 기간 기반 펀딩비 예상 횟수 (Bybit/Binance: 8시간 간격)
+            pos_style = candidate.get("style") or self.settings.get("trading_style", "short")
+            preset = TRADING_STYLE_PRESETS.get(pos_style, TRADING_STYLE_PRESETS["short"])
+            max_hold_h = preset.get("max_hold_hours") or 8
+            funding_periods = max(1.0, max_hold_h / 8.0)
+            adverse_funding = funding_rate if side == "long" else -funding_rate
+            if adverse_funding > 0:
+                funding_cost_pct = adverse_funding * 100 * funding_periods
 
         cost_pct = fee_pct + (slippage_pct * 2) + spread_pct + funding_cost_pct
         return {
@@ -2952,9 +2957,18 @@ class AutoTradeBot:
             f"positions={len(self._futures_positions)}/{self.settings['max_positions']}, "
             f"regime={regime}"
         )
+        import time as _ft
+        _now_ft = _ft.time()
+        # 만료된 블랙리스트 항목 정리
+        self._reentry_blacklist = {s: t for s, t in self._reentry_blacklist.items() if t > _now_ft}
+
         for candidate in candidates:
             if len(self._futures_positions) >= self.settings["max_positions"]:
                 break
+            # 재진입 금지 체크 (손절 후 2시간)
+            if self._reentry_blacklist.get(candidate["symbol"], 0) > _now_ft:
+                logger.debug(f"AutoBot 선물 재진입 차단 {candidate['symbol']}: 블랙리스트 잔여 {int(self._reentry_blacklist[candidate['symbol']] - _now_ft)}초")
+                continue
             try:
                 await self._open_futures_position(candidate)
                 await asyncio.sleep(0.3)
@@ -3014,6 +3028,20 @@ class AutoTradeBot:
         usdt_balance = self._futures_broker.usdt_balance
         sl_pct = scan_result.get("sl_pct") or self.settings["stop_loss_pct"]
         tp_pct = scan_result.get("tp_pct") or self.settings["take_profit_pct"]
+
+        # ATR 기반 적응형 SL/TP: 고정 SL이 ATR보다 좁으면 노이즈 손절 빈발
+        # SL = max(고정값, ATR×1.2), TP는 R:R 유지를 위해 같은 비율로 스케일
+        atr_pct = self._float(scan_result.get("atr_pct"), 0.0)
+        if atr_pct > 0:
+            atr_min_sl = round(atr_pct * 1.2, 2)
+            if sl_pct < atr_min_sl:
+                scale = atr_min_sl / sl_pct
+                tp_pct = round(tp_pct * scale, 2)
+                logger.info(
+                    f"AutoBot 선물 SL/TP 조정 {symbol}: SL {sl_pct}%→{atr_min_sl}%, "
+                    f"TP {round(tp_pct/scale,2)}%→{tp_pct}% (ATR={atr_pct}%, R:R 유지)"
+                )
+                sl_pct = atr_min_sl
 
         max_effective_leverage = int(self.settings.get("max_effective_leverage", 3))
         if leverage > max_effective_leverage:
@@ -3095,15 +3123,18 @@ class AutoTradeBot:
             return
 
         fp = self._futures_broker.positions[symbol]
-        sl_price = price * (1 - sl_pct / 100) if side == "long" else price * (1 + sl_pct / 100)
-        tp_price = price * (1 + tp_pct / 100) if side == "long" else price * (1 - tp_pct / 100)
+        # SL/TP는 실제 체결가(슬리피지 반영) 기준으로 설정
+        fill_price = fp["entry_price"]
+        sl_price = fill_price * (1 - sl_pct / 100) if side == "long" else fill_price * (1 + sl_pct / 100)
+        tp_price = fill_price * (1 + tp_pct / 100) if side == "long" else fill_price * (1 - tp_pct / 100)
 
         _pos_style = scan_result.get("style", self.settings.get("trading_style", "short"))
         _pos_style_label = TRADING_STYLE_PRESETS.get(_pos_style, {}).get("label", "단타")
         self._futures_positions[symbol] = {
             "symbol":               symbol,
             "side":                 side,
-            "entry_price":          price,
+            "entry_price":          fill_price,   # 슬리피지 반영된 실제 체결가
+            "mark_price_at_entry":  price,        # 진입 당시 마크가격 (참고용)
             "contracts":            fp["contracts"],
             "leverage":             leverage,
             "margin_mode":          self.settings["margin_mode"],
@@ -3114,8 +3145,8 @@ class AutoTradeBot:
             "current_price":        price,
             "unrealized_pnl_usdt":  0.0,
             "unrealized_pnl_pct":   0.0,
-            "highest_price":        price,   # 트레일링 스탑용 고점 추적
-            "lowest_price":         price,   # 트레일링 스탑용 저점 추적 (숏)
+            "highest_price":        fill_price,   # 트레일링 스탑용 고점 추적
+            "lowest_price":         fill_price,   # 트레일링 스탑용 저점 추적 (숏)
             "trailing_active":      False,
             "breakeven_set":        False,
             "funding_rate":         scan_result.get("funding_rate", 0.0),
@@ -3133,7 +3164,8 @@ class AutoTradeBot:
         }
 
         logger.info(
-            f"AutoBot 선물 진입 {symbol} {side.upper()} @ {price:.4f} USDT  "
+            f"AutoBot 선물 진입 {symbol} {side.upper()} @ {fill_price:.4f} USDT  "
+            f"(마크={price:.4f}, 슬리피지={fill_price-price:+.4f})  "
             f"증거금={usdt_amount:.2f}  레버리지={leverage}x  점수={scan_result['score']}"
         )
 
@@ -3205,6 +3237,13 @@ class AutoTradeBot:
             self._portfolio_risk.record_trade(pnl_usdt)
             if reason == "stop_loss" and pnl_pct < 0:
                 self._consecutive_losses += 1
+                # 손절 종목 재진입 금지 2시간
+                import time as _fl_t
+                self._reentry_blacklist[symbol] = _fl_t.time() + 7200
+                logger.info(f"AutoBot 선물 재진입 금지 등록 {symbol}: 2시간")
+                if self._consecutive_losses >= 3:
+                    self._cooldown_until = _fl_t.time() + 1800
+                    logger.warning(f"AutoBot 선물 연속 손절 {self._consecutive_losses}회 → 30분 신규 진입 차단")
             else:
                 self._consecutive_losses = 0
 
@@ -3353,6 +3392,26 @@ class AutoTradeBot:
                                     f"TP진행 {tp_progress:.0%}: SL → {new_sl:.4f}"
                                 )
                         break
+
+            # ── 최대 보유 시간 초과 청산 ─────────────────────────────────────
+            _pos_style  = pos.get("position_style") or self.settings.get("trading_style", "short")
+            _preset     = TRADING_STYLE_PRESETS.get(_pos_style, TRADING_STYLE_PRESETS["short"])
+            _max_hold_h = _preset.get("max_hold_hours", 0)
+            if _max_hold_h > 0:
+                _entry_dt = pos.get("entry_at")
+                if _entry_dt:
+                    try:
+                        _entry_time = datetime.fromisoformat(_entry_dt)
+                        _held_hours = (datetime.now(KST) - _entry_time).total_seconds() / 3600
+                        if _held_hours > _max_hold_h:
+                            logger.info(
+                                f"AutoBot 선물 최대보유 초과 {symbol}: "
+                                f"{_held_hours:.1f}h > {_max_hold_h}h → 청산"
+                            )
+                            await self._close_futures_position(symbol, price, "max_hold_exceeded")
+                            continue
+                    except Exception:
+                        pass
 
             sl = pos["stop_loss_price"]
             tp = pos["take_profit_price"]
