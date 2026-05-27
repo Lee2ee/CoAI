@@ -47,6 +47,8 @@
 | 새 로그 타입 프론트 렌더링 | AutoTradePanel.tsx |
 | EquityChart 빈 배열 버그 수정 | EquityChart.tsx |
 | useWebSocket 메모리 누수 수정 | useWebSocket.ts |
+| 동적 리스크 캡 (position_size_pct × SL% 기반 implied_risk 계산 → 포지션 크기 안전 상한) | bot.py |
+| 선물 동적 리스크 캡 (leverage 반영) | bot.py |
 
 ---
 
@@ -82,6 +84,7 @@
 | 포트폴리오 최대 노출 한도 (총 자산 80%) | [x] | `risk/manager.py:RiskManager` |
 | 포트폴리오 상관관계 체크 | [x] | `risk/manager.py:check_correlation()`, `bot.py:_refresh_close_cache()` |
 | 포지션 비중 동적 조절 (Kelly Criterion) | [x] | `risk/manager.py:calc_kelly_fraction()`, `bot.py:_open_position()` |
+| 동적 리스크 캡 (implied_risk = position_size_pct × SL%, 선물 × leverage) | [x] | `bot.py:_open_position()`, `_open_futures_position()` |
 | 피라미딩 (수익 구간 단계별 추가 진입) | [x] | `bot.py:_check_pyramid_entry()`, `_pyramid_into_position()` |
 | 부분 청산 전략 (목표가 도달 시 일부 청산 + 나머지 트레일링) | [x] | `bot.py:_check_partial_exit()` |
 | ATR 기반 동적 포지션 사이징 (변동성 비례 투자금) | [ ] | → **TODO 23** |
