@@ -190,6 +190,17 @@ STYLE_SL_PROTECT_PCT: dict[str, float] = {
 }
 
 
+# 현물/선물 모드별 독립 저장 대상 키 목록
+_MODE_SPECIFIC_KEYS: list[str] = [
+    "trading_style", "risk_profile", "scan_interval_min", "max_positions",
+    "position_size_pct", "stop_loss_pct", "take_profit_pct", "min_score",
+    "timeframe", "auto_avg_down", "avg_down_threshold_pct", "max_avg_down",
+    "auto_add", "add_threshold_pct", "max_add", "trailing_stop",
+    "trailing_activate_pct", "trailing_pct", "max_hold_hours",
+    "leverage", "margin_mode",
+]
+
+
 class AutoTradeBot:
     def __init__(self):
         self._scheduler = AsyncIOScheduler()
@@ -301,6 +312,22 @@ class AutoTradeBot:
             "margin_mode": "cross",        # "cross" | "isolated"
             # ── 자동 스타일 전환 허용 목록 ────────────────────────────────────
             "allowed_styles": ["scalping", "short", "mid", "long"],
+        }
+
+        # ── 현물/선물 설정 독립 저장소 ──────────────────────────────────────────
+        # market_type 전환 시 각 모드 설정을 보존하여 독립적으로 관리
+        self._spot_settings: dict = {
+            k: self.settings[k] for k in _MODE_SPECIFIC_KEYS if k in self.settings
+        }
+        self._futures_settings: dict = {
+            "trading_style": "short", "risk_profile": "balanced",
+            "scan_interval_min": 5, "max_positions": 4,
+            "position_size_pct": 25.0, "stop_loss_pct": 1.5, "take_profit_pct": 4.5,
+            "min_score": 55, "timeframe": "1h",
+            "auto_avg_down": False, "avg_down_threshold_pct": 3.0, "max_avg_down": 1,
+            "auto_add": False, "add_threshold_pct": 3.0, "max_add": 1,
+            "trailing_stop": True, "trailing_activate_pct": 1.5, "trailing_pct": 0.8,
+            "max_hold_hours": 12, "leverage": 8, "margin_mode": "cross",
         }
 
     # ── 프로퍼티 ─────────────────────────────────────────────────────────────
@@ -533,7 +560,30 @@ class AutoTradeBot:
         # 3. 봇 정지
         self.stop()
 
+    def update_mode_settings(self, mode: str, new_settings: dict):
+        """현물 또는 선물 설정을 독립적으로 업데이트. 활성 모드면 self.settings에도 즉시 반영."""
+        saved = self._futures_settings if mode == "futures" else self._spot_settings
+        for k, v in new_settings.items():
+            if k in saved:
+                saved[k] = v
+        if self.settings.get("market_type", "spot") == mode:
+            self.update_settings({k: v for k, v in new_settings.items() if k != "market_type"})
+
     def update_settings(self, new_settings: dict):
+        # market_type 전환: 현재 모드 설정 저장 → 새 모드 설정 복원
+        if "market_type" in new_settings:
+            new_type = new_settings["market_type"]
+            old_type = self.settings.get("market_type", "spot")
+            if new_type != old_type:
+                cur_saved = self._futures_settings if old_type == "futures" else self._spot_settings
+                cur_saved.update({k: self.settings[k] for k in _MODE_SPECIFIC_KEYS if k in self.settings})
+                new_saved = self._futures_settings if new_type == "futures" else self._spot_settings
+                for k, v in new_saved.items():
+                    if k in self.settings:
+                        self.settings[k] = v
+                logger.info(f"AutoBot market_type 전환: {old_type} → {new_type} (저장된 {new_type} 설정 복원)")
+            self.settings["market_type"] = new_type
+
         # 스타일 변경 시 프리셋 + 투자 성향(risk_profile)을 함께 적용
         if "trading_style" in new_settings:
             style = new_settings["trading_style"]
