@@ -57,8 +57,8 @@ TRADING_STYLE_PRESETS: dict[str, dict] = {
         "label": "단타",
         "timeframe": "15m",
         "scan_interval_min": 5,
-        "stop_loss_pct": 1.5,
-        "take_profit_pct": 4.5,    # 손익비 3:1 확보
+        "stop_loss_pct": 2.5,
+        "take_profit_pct": 5.0,    # 손익비 2:1
         "min_score": 48,
         "position_size_pct": 25.0,
         "max_positions": 4,
@@ -70,8 +70,8 @@ TRADING_STYLE_PRESETS: dict[str, dict] = {
         "max_add": 1,
         # 트레일링 스탑: 2% 이익 시 활성화 → 고점 대비 1% 하락 시 청산
         "trailing_stop": True,
-        "trailing_activate_pct": 1.5,  # 이익 보전 더 빠르게
-        "trailing_pct": 0.8,           # 타이트한 트레일링
+        "trailing_activate_pct": 2.0,
+        "trailing_pct": 1.0,
         # 최대 보유 시간: 단타 6시간
         "max_hold_hours": 6,
     },
@@ -259,10 +259,10 @@ class AutoTradeBot:
             "scan_interval_min": 5,
             "max_positions": 4,
             "position_size_pct": 25.0,
-            "stop_loss_pct": 1.5,
-            "take_profit_pct": 4.5,         # 손익비 3:1
+            "stop_loss_pct": 2.5,           # 현물 기본값 (선물은 _futures_settings에서 1.5%)
+            "take_profit_pct": 5.0,         # 현물 손익비 2:1
             "min_score": 48,
-            "timeframe": "1h",
+            "timeframe": "15m",
             # 물타기
             "auto_avg_down": True,
             "avg_down_threshold_pct": 3.0,
@@ -273,8 +273,8 @@ class AutoTradeBot:
             "max_add": 1,
             # 트레일링 스탑
             "trailing_stop": True,
-            "trailing_activate_pct": 1.5,   # 이익 보전 더 빠르게
-            "trailing_pct": 0.8,            # 타이트한 트레일링
+            "trailing_activate_pct": 2.0,
+            "trailing_pct": 1.0,
             # AI 기능 개별 활성화
             "ai_entry_validation": True,   # 진입 신뢰도 AI 검증
             "ai_regime_detection": True,   # 시장 국면 자동 감지 + 스타일 조정
@@ -317,7 +317,14 @@ class AutoTradeBot:
         # ── 현물/선물 설정 독립 저장소 ──────────────────────────────────────────
         # market_type 전환 시 각 모드 설정을 보존하여 독립적으로 관리
         self._spot_settings: dict = {
-            k: self.settings[k] for k in _MODE_SPECIFIC_KEYS if k in self.settings
+            "trading_style": "short", "risk_profile": "balanced",
+            "scan_interval_min": 5, "max_positions": 4,
+            "position_size_pct": 25.0, "stop_loss_pct": 2.5, "take_profit_pct": 5.0,
+            "min_score": 48, "timeframe": "15m",
+            "auto_avg_down": True, "avg_down_threshold_pct": 3.0, "max_avg_down": 2,
+            "auto_add": False, "add_threshold_pct": 3.0, "max_add": 1,
+            "trailing_stop": True, "trailing_activate_pct": 2.0, "trailing_pct": 1.0,
+            "max_hold_hours": 6, "leverage": 1, "margin_mode": "cross",
         }
         self._futures_settings: dict = {
             "trading_style": "short", "risk_profile": "balanced",
@@ -599,6 +606,13 @@ class AutoTradeBot:
         for k, v in new_settings.items():
             if k != "trading_style" and k in self.settings:
                 self.settings[k] = v
+
+        # 활성 모드 저장소 동기화 (market_type 전환 제외, 전환 로직이 이미 처리)
+        if "market_type" not in new_settings:
+            _active_saved = self._futures_settings if self.settings.get("market_type") == "futures" else self._spot_settings
+            for k in _MODE_SPECIFIC_KEYS:
+                if k in self.settings and k in _active_saved:
+                    _active_saved[k] = self.settings[k]
 
         # allowed_styles 변경 시: 현재 trading_style이 미허용이면 가장 가까운 허용 스타일로 보정
         if "allowed_styles" in new_settings:
