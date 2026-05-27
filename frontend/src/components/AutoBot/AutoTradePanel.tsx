@@ -315,18 +315,19 @@ function SettingsModal({
             <div className="grid grid-cols-3 gap-1.5">
               {(['upbit', 'binance', 'bybit'] as const).map(ex => {
                 const connected = connectedExchanges.has(ex)
+                // 선물 탭에서는 업비트 비활성화
+                const disabled = !connected || (settingsTab === 'futures' && ex === 'upbit')
+                const disabledReason = !connected
+                  ? `${EXCHANGE_LABEL[ex]} ${isPaperMode ? '모의투자' : '실거래'} 계정이 등록되지 않았습니다. 거래소 계정 메뉴에서 API 키를 등록하세요.`
+                  : '업비트는 현물 거래만 지원합니다.'
                 return (
                   <button
                     key={ex}
-                    disabled={!connected}
-                    onClick={() => connected && setForm(f => ({
-                      ...f,
-                      exchange_id: ex,
-                      ...(ex === 'upbit' ? { market_type: 'spot' } : {}),
-                    }))}
+                    disabled={disabled}
+                    onClick={() => !disabled && setForm(f => ({ ...f, exchange_id: ex }))}
                     className={clsx(
                       'py-2 rounded-lg text-xs font-medium border transition-colors',
-                      !connected
+                      disabled
                         ? 'bg-surface-800 border-surface-700 text-slate-600 cursor-not-allowed'
                         : (form.exchange_id ?? 'upbit') === ex
                           ? `bg-brand-500/20 border-brand-500 ${EXCHANGE_COLOR[ex]}`
@@ -335,55 +336,12 @@ function SettingsModal({
                   >
                     <span className="flex items-center justify-center gap-1">
                       {EXCHANGE_LABEL[ex]}
-                      {!connected && (
-                        <Tooltip
-                          text={`${EXCHANGE_LABEL[ex]} ${isPaperMode ? '모의투자' : '실거래'} 계정이 등록되지 않았습니다. 거래소 계정 메뉴에서 API 키를 등록하세요.`}
-                          iconOnly
-                        />
-                      )}
+                      {disabled && <Tooltip text={disabledReason} iconOnly />}
                     </span>
                   </button>
                 )
               })}
             </div>
-          </div>
-
-          {/* 활성 거래 모드 전환 */}
-          <div>
-            <p className="text-xs text-slate-400 font-medium mb-1.5 flex items-center gap-1">
-              활성 거래 모드
-              <Tooltip text="봇이 실제로 운영하는 모드입니다. 저장 시 이 모드로 즉시 전환됩니다." iconOnly />
-            </p>
-            <div className="grid grid-cols-2 gap-1.5">
-              {(['spot', 'futures'] as const).map(mt => {
-                const isUpbit = (form.exchange_id ?? 'upbit') === 'upbit'
-                const isFuturesDisabled = mt === 'futures' && isUpbit
-                return (
-                  <button
-                    key={mt}
-                    disabled={isFuturesDisabled}
-                    onClick={() => {
-                      if (isFuturesDisabled) return
-                      setSpotForm(f => ({ ...f, market_type: mt }))
-                      setFuturesForm(f => ({ ...f, market_type: mt }))
-                    }}
-                    className={clsx(
-                      'py-2 rounded-lg text-xs font-medium border transition-colors',
-                      isFuturesDisabled
-                        ? 'bg-surface-800 border-surface-700 text-slate-600 cursor-not-allowed'
-                        : form.market_type === mt
-                          ? 'bg-brand-500/20 border-brand-500 text-brand-400'
-                          : 'bg-surface-700 border-surface-600 text-slate-400 hover:text-slate-200'
-                    )}
-                  >
-                    {mt === 'spot' ? '현물 (Spot)' : '선물 (Futures)'}
-                  </button>
-                )
-              })}
-            </div>
-            {(form.exchange_id ?? 'upbit') === 'upbit' && (
-              <p className="text-xs text-slate-500 mt-1">업비트는 현물 거래만 지원합니다.</p>
-            )}
           </div>
 
           {/* 선물 탭 전용: 레버리지 + 마진 모드 */}
@@ -1518,11 +1476,13 @@ export default function AutoTradePanel() {
           settings={status.settings}
           onSave={(s, mode) => {
             // 공유 설정 (거래소, 모드, 모의/실거래) → 기존 settingsMut
-            const shared: Record<string, unknown> = {}
+            // market_type은 탭 기반으로 자동 결정
+            const shared: Record<string, unknown> = {
+              market_type: mode,  // 현물 탭 저장 → spot, 선물 탭 저장 → futures
+            }
             if (s.exchange_id !== undefined) shared.exchange_id = s.exchange_id
-            if (s.market_type !== undefined) shared.market_type = s.market_type
             if (s.is_paper !== undefined) shared.is_paper = s.is_paper
-            if (Object.keys(shared).length > 0) settingsMut.mutate(shared)
+            settingsMut.mutate(shared)
             // 모드별 설정 → 해당 엔드포인트
             if (mode === 'spot') spotSettingsMut.mutate(s)
             else futuresSettingsMut.mutate(s)
