@@ -7,9 +7,9 @@
 | 레이어 | 설명 |
 |--------|------|
 | **자동매매봇** | 규칙 기반 스캐너 + AI 보조 진입/청산 결정 |
-| **전략 빌더** | 사용자 정의 조건 전략 → 백테스트 → 실행 (별도 시스템) |
+| **전략 빌더** | 사용자 정의 조건 전략 → 백테스트 → 실행 (자동매매봇과 연동) |
 | **AI 레이어** | LLM 멀티 프로바이더 지원 (Ollama / Groq / Claude / OpenAI / Gemini) |
-| **시장 데이터** | ccxt를 통한 업비트 REST API |
+| **시장 데이터** | ccxt를 통한 업비트 REST API (현물) / Binance REST API (선물) |
 
 ---
 
@@ -182,8 +182,7 @@ Strategy DB (SQLite)
        └─ APScheduler → 활성 전략 자동 실행 (paper/live)
 ```
 
-> **TODO**: 전략 빌더의 DB 전략을 자동매매봇 스캐너에서 활용하는 통합 기능은 미구현 상태.
-> (TODO.md 항목 #5 참조)
+> 전략 빌더의 DB 전략은 자동매매봇 스캐너에서 활용 가능 (`bot.py`, `strategy/engine.py` 연동 완료).
 
 ---
 
@@ -274,7 +273,7 @@ _positions dict
 
 | 구성 요소 | 역할 |
 |----------|------|
-| 업비트 REST API (ccxt 4.3.11) | OHLCV, 현재가 데이터 |
+| 업비트 REST API (ccxt 4.5.50) | OHLCV, 현재가 데이터 |
 | pandas-ta 0.4.71b0 | RSI / EMA / MACD / BB / STOCH / ATR 지표 계산 |
 | APScheduler | 스캔 사이클 + 전략 실행 타이머 |
 | asyncio | 실시간 가격 모니터 루프 |

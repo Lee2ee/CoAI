@@ -47,15 +47,14 @@ AI 진입 검증 (10분 캐시/종목, 선택적)
 
 ## 3. 스캔 대상 종목
 
-업비트 KRW 마켓 거래량 상위 25개 종목 고정 스캔.
+업비트 전체 KRW 마켓을 동적으로 스캔합니다 (30분 캐시, `scanner.py:_fetch_dynamic_symbols()`).
+캐시 갱신 실패 또는 초기 기동 시 아래 기본 25개 종목 폴백:
 
 ```
 BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, ATOM,
 MATIC, LTC, BCH, ETC, TRX, NEAR, APT, OP, SUI, SEI,
 SAND, MANA, ALGO, HBAR, VET
 ```
-
-> **확장 포인트**: `SCAN_SYMBOLS` 리스트 교체 또는 업비트 전체 KRW 마켓 동적 조회로 전환 가능 (TODO #6)
 
 ---
 
@@ -197,6 +196,19 @@ MACD(12, 26, 9) 교차 및 강세 구간.
 - 잔고의 `position_size_pct`% 만큼 시장가 매수 (PaperBroker)
 - 최소 투입금액: 5,000 KRW
 - 진입 즉시 전략 SL/TP 가격 계산 + 저장
+
+**동적 리스크 캡 (포지션 크기 안전 상한)**
+
+```
+implied_risk_pct = position_size_pct × stop_loss_pct / 100
+  (선물) × leverage
+effective_risk_pct = max(implied_risk_pct, risk_per_trade_pct)   # 5.0% 안전 하한
+risk_cap = balance × effective_risk_pct / actual_sl_pct
+
+invest_krw = min(설정 금액, risk_cap, balance × 0.90)
+```
+
+사용자 설정이 자기 일관적이면 캡이 발동하지 않음. 설정값이 과도할 때만 자동으로 포지션 크기를 줄여 실질 손실이 `risk_per_trade_pct`를 초과하지 않도록 보호.
 
 ### 8-2. 실시간 손절/익절 (0.5초 루프)
 
@@ -350,26 +362,26 @@ _strategy_performance: {
 
 | 항목 | 모의투자 | 실투자 |
 |------|---------|--------|
-| 주문 실행 | PaperBroker 가상 체결 | 업비트 실제 API 주문 |
-| 시세 데이터 | 실제 업비트 REST API | 동일 |
+| 주문 실행 | PaperBroker 가상 체결 | 업비트 / Binance 실제 API 주문 |
+| 시세 데이터 | 실제 REST API | 동일 |
 | 잔고 | 가상 (기본 1,000,000 KRW) | 실제 계좌 잔고 |
 | 슬리피지 | 없음 | 실제 호가 스프레드 적용 |
-| 수수료 | 가상 0.05% | 실제 업비트 수수료 |
+| 수수료 | 가상 0.05% | 실제 거래소 수수료 |
 
-> 현재 봇은 항상 모의투자 모드로 동작 (`is_paper=True` 고정).
-> 실투자 전환 시 `PaperBroker` → 업비트 주문 API 연동 필요.
+UI의 **모의/실거래 전환 토글**(`LiveSwitchModal`)에서 거래소 계정 등록 및 잔고 확인 후 전환 가능.
+전환 시 실제 자산이 거래되므로 반드시 소액으로 먼저 검증하세요.
 
 ---
 
 ## 12. 알고리즘 고도화 방향
 
 ### 단기 (구현 난이도 낮음)
-- **동적 종목 스캔**: 고정 25개 → 업비트 전체 KRW 마켓 실시간 거래량 상위 N개 (TODO #6)
+- **동적 종목 스캔**: ~~고정 25개~~ → 업비트 전체 KRW 마켓 거래량 상위 N개 **구현 완료** (`scanner.py:_fetch_dynamic_symbols()`)
 - **전략 가중치 자동 조정**: `_strategy_performance` 실적 기반 `STYLE_PREFERRED_STRATEGIES` 동적 변경
 - **진입 조건 강화**: 볼린저 밴드 / 스토캐스틱 등 추가 지표 점수에 편입
 
 ### 중기 (구현 난이도 중간)
-- **전략 빌더 통합**: DB 저장 전략을 봇 스캐너에서 평가 → 개인화 진입 조건 (TODO #5)
+- **전략 빌더 통합**: DB 저장 전략을 봇 스캐너에서 평가 → 개인화 진입 조건 **구현 완료** (`bot.py`, `strategy/engine.py`)
 - **다중 타임프레임 확인**: 진입 전 상위 타임프레임 추세 확인 (예: 1h 진입 시 4h 방향 일치 여부)
 - **포트폴리오 리스크 관리**: 전체 포지션 상관관계 기반 종목별 사이즈 조정
 
