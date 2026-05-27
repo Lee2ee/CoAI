@@ -285,8 +285,8 @@ class AutoTradeBot:
             "min_volume_ratio": 0.5,  # 극저유동성만 차단 (volume은 스코어+비용에서 이미 반영)
             "max_effective_leverage": 3,
             "min_liquidation_buffer_pct": 3.0,
-            "max_adverse_funding_rate": 0.0005,
-            "max_abs_funding_rate": 0.002,
+            "max_adverse_funding_rate": 0.001,   # 0.1%/8h — 이 이상이면 hard block (net_rr로도 이미 반영됨)
+            "max_abs_funding_rate": 0.003,        # 0.3%/8h — 극단적 펀딩 시 양방향 차단
             # ── 부분 청산 (TODO 22) ────────────────────────────────────────────
             "partial_exit_enabled": False,      # 부분 청산 활성화
             "partial_exit_ratio": 0.4,          # TP 트리거 도달 시 청산 비율 (40%)
