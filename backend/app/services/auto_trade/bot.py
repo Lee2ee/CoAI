@@ -2097,11 +2097,11 @@ class AutoTradeBot:
         cost_pct = cost["cost_pct"]
 
         if price <= 0:
-            reasons.append("missing price")
+            reasons.append("현재가 조회 실패")
         if sl_pct <= 0 or tp_pct <= 0:
-            reasons.append("missing SL/TP")
+            reasons.append("SL/TP 미설정")
         if cost_pct <= 0 or cost_pct > self.settings.get("max_trade_cost_pct", 0.45):
-            reasons.append(f"cost too high/unknown ({cost_pct:.2f}%)")
+            reasons.append(f"비용 과다/미산출 ({cost_pct:.2f}%)")
 
         gross_rr = tp_pct / max(sl_pct, 0.01) if sl_pct > 0 else 0.0
         net_reward = max(0.0, tp_pct - cost_pct)
@@ -2109,20 +2109,24 @@ class AutoTradeBot:
         net_rr = net_reward / max(net_risk, 0.01)
         if gross_rr < min_rr or net_rr < min_net_rr:
             reasons.append(
-                f"RR below threshold (gross {gross_rr:.2f}/{min_rr:.2f}, net {net_rr:.2f}/{min_net_rr:.2f})"
+                f"손익비 미달 (총 {gross_rr:.2f}/{min_rr:.2f}, 순 {net_rr:.2f}/{min_net_rr:.2f})"
             )
 
         atr_pct = self._float(candidate.get("atr_pct"), 0.0)
         if atr_pct <= 0:
-            reasons.append("missing volatility")
+            logger.warning(
+                f"변동성(ATR) 누락 — symbol={candidate.get('symbol')} "
+                f"atr_pct raw={candidate.get('atr_pct')!r}"
+            )
+            reasons.append("변동성(ATR) 데이터 없음")
         elif sl_pct < atr_pct * 0.8 and candidate.get("strategy_type") != "mean_reversion":
-            reasons.append(f"SL too tight vs ATR ({sl_pct:.2f}% < {atr_pct:.2f}% ATR)")
+            reasons.append(f"SL이 ATR 대비 너무 좁음 ({sl_pct:.2f}% < ATR {atr_pct:.2f}%)")
 
         volume_ratio = self._float(candidate.get("volume_ratio"), 0.0)
         min_volume_ratio = self.settings.get("min_volume_ratio", 1.1)
         # volume_ratio == 0.0 means exchange returned no volume data — skip check
         if 0 < volume_ratio < min_volume_ratio and candidate.get("strategy_type") != "mean_reversion":
-            reasons.append(f"volume not confirmed ({volume_ratio:.2f}x)")
+            reasons.append(f"거래량 미확인 ({volume_ratio:.2f}x)")
 
         mtf_trend = candidate.get("mtf_trend", "neutral")
         is_surge = (
@@ -2130,9 +2134,9 @@ class AutoTradeBot:
             and self._float(candidate.get("price_change_pct"), 0.0) >= 3.0
         )
         if side == "long" and mtf_trend == "bearish" and not is_surge:
-            reasons.append("higher timeframe bearish")
+            reasons.append("상위 타임프레임 하락추세")
         if side == "short" and mtf_trend == "bullish" and not is_surge:
-            reasons.append("higher timeframe bullish")
+            reasons.append("상위 타임프레임 상승추세")
 
         if market_type == "futures":
             funding_rate = self._float(candidate.get("funding_rate"), 0.0)
@@ -2142,12 +2146,12 @@ class AutoTradeBot:
                 funding_rate if side == "long" else -funding_rate
             )
             if abs(funding_rate) > max_abs_funding:
-                reasons.append(f"funding too extreme ({funding_rate * 100:.3f}%)")
+                reasons.append(f"극단적 펀딩비 ({funding_rate * 100:.3f}%)")
             if adverse_funding > max_adverse_funding:
-                reasons.append(f"adverse funding ({funding_rate * 100:.3f}%)")
+                reasons.append(f"불리한 펀딩비 ({funding_rate * 100:.3f}%)")
             max_leverage = int(self.settings.get("max_effective_leverage", 20))
             if leverage > max_leverage:
-                reasons.append(f"leverage above cap ({leverage}x > {max_leverage}x)")
+                reasons.append(f"레버리지 한도 초과 ({leverage}x > {max_leverage}x)")
             if liquidation_price and price > 0:
                 if side == "long":
                     liq_distance = (price - liquidation_price) / price * 100
@@ -2156,7 +2160,7 @@ class AutoTradeBot:
                 min_liq_distance = sl_pct + self.settings.get("min_liquidation_buffer_pct", 3.0)
                 if liq_distance <= min_liq_distance:
                     reasons.append(
-                        f"liquidation too close ({liq_distance:.2f}% <= {min_liq_distance:.2f}%)"
+                        f"청산가 너무 근접 ({liq_distance:.2f}% <= {min_liq_distance:.2f}%)"
                     )
 
         detail = {
@@ -2172,13 +2176,13 @@ class AutoTradeBot:
         return not reasons, detail
 
     def _record_no_trade(self, symbol: str, detail: dict):
-        reason = detail.get("reason", "risk filter blocked")
+        reason = detail.get("reason", "리스크 필터 차단")
         log_entry = {
             "at": datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
             "type": "entry_blocked",
             "symbol": symbol,
             "confidence": 0,
-            "reason": f"NO_TRADE: {reason}",
+            "reason": f"진입차단: {reason}",
             "score": detail.get("score", 0),
             "side": detail.get("side"),
             "leverage": detail.get("leverage"),
