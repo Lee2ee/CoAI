@@ -287,7 +287,7 @@ class AutoTradeBot:
             "correlation_threshold": 0.85,       # 종목 간 상관계수 진입 차단 임계값
             "mdd_limit_pct": 20.0,              # MDD 이 값(%) 초과 시 봇 자동 중지
             "risk_filter_enabled": True,
-            "risk_per_trade_pct": 0.8,
+            "risk_per_trade_pct": 5.0,  # 거래당 최대 손실 한도 (잔고 %). 너무 낮으면 position_size_pct 무시됨
             "min_reward_risk_ratio": 2.0,
             "min_net_reward_risk_ratio": 1.5,
             "max_trade_cost_pct": 0.45,
@@ -2338,9 +2338,14 @@ class AutoTradeBot:
                 self._record_no_trade(symbol, risk_detail)
                 return
 
-            risk_budget = total_value * self.settings.get("risk_per_trade_pct", 0.8) / 100
+            risk_budget = total_value * self.settings.get("risk_per_trade_pct", 5.0) / 100
             risk_cap = risk_budget / max(risk_detail.get("risk_pct", sl_pct) / 100, 0.001)
             if risk_cap < invest_krw:
+                logger.info(
+                    f"AutoBot 현물 포지션 크기 조정 {symbol}: "
+                    f"설정 {invest_krw:.2f} → 적용 {risk_cap:.2f} "
+                    f"(risk_cap, risk_per_trade={self.settings.get('risk_per_trade_pct',5.0)}%)"
+                )
                 invest_krw = risk_cap
 
             min_invest = 5_000 if self._quote_currency == "KRW" else 5
@@ -3179,6 +3184,12 @@ class AutoTradeBot:
             else _desired
         )
         usdt_amount = round(min(_desired, _risk_cap, usdt_balance * 0.90), 4)
+        if usdt_amount < _desired * 0.9:
+            logger.info(
+                f"AutoBot 선물 포지션 크기 조정 {symbol}: "
+                f"설정 {_desired:.2f} → 적용 {usdt_amount:.2f} USDT "
+                f"(risk_cap={_risk_cap:.2f}, risk_per_trade={self.settings.get('risk_per_trade_pct',5.0)}%)"
+            )
         if usdt_amount < 5:
             risk_detail = {
                 **risk_detail,
