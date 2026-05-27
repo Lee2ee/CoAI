@@ -851,6 +851,10 @@ const STRATEGY_COLORS: Record<string, string> = {
   golden_cross:    'bg-amber-500/20 text-amber-400',
   macd_momentum:   'bg-purple-500/20 text-purple-400',
   volume_breakout: 'bg-up/20 text-up',
+  futures_trend:    'bg-cyan-500/20 text-cyan-300',
+  futures_breakout: 'bg-up/20 text-up',
+  futures_momentum: 'bg-purple-500/20 text-purple-400',
+  no_signal:       'bg-surface-700 text-slate-500',
   standard:        'bg-surface-600 text-slate-400',
 }
 
@@ -1342,6 +1346,8 @@ export default function AutoTradePanel() {
     queryKey: ['auto-bot-status'],
     queryFn: async () => (await api.get('/auto-bot/status')).data,
     refetchInterval: 3_000,
+    retry: false,
+    refetchOnWindowFocus: false,
   })
 
   const _isPaper = status?.settings?.is_paper ?? true
@@ -1424,8 +1430,12 @@ export default function AutoTradePanel() {
   }
 
   const exchangeId = status.settings.exchange_id ?? 'upbit'
-  const isFutures  = (status.settings.market_type ?? 'spot') === 'futures'
+  const isFutures  = (status.market_type ?? status.settings.market_type ?? 'spot') === 'futures'
   const isPaper    = status.settings.is_paper ?? true
+  const futuresPositions = status.futures_positions ?? []
+  const positionCount = isFutures ? futuresPositions.length : status.positions.length
+  const latestEntryBlock = status.ai_analysis_log?.find(entry => entry.type === 'entry_blocked')
+  const topScan = status.scan_results[0]
 
   const handleModeToggle = () => {
     if (isPaper) {
@@ -1853,7 +1863,7 @@ export default function AutoTradePanel() {
         {/* 탭 */}
         <div className="flex gap-1 border-b border-surface-700">
           {([
-            ['positions', `포지션 (${isFutures ? (status.futures_positions ?? []).length : status.positions.length})`],
+            ['positions', `포지션 (${positionCount})`],
             ['scan', `스캔 결과 (${status.scan_results.length})`],
             ['log', `거래 내역 (${tradeStats?.total ?? status.total_trades})`],
             ['ai', `AI 활동 (${status.ai_analysis_log?.length ?? 0})`],
@@ -1874,23 +1884,38 @@ export default function AutoTradePanel() {
 
         {/* 탭 컨텐츠 */}
         {tab === 'positions' && (
-          (isFutures ? (status.futures_positions ?? []).length : status.positions.length) === 0 ? (
-            <p className="text-sm text-slate-500 py-2">
-              {status.running
-                ? '진입 조건을 탐색 중... 스캔 후 조건 충족 종목에 자동 진입합니다.'
-                : '봇을 시작하면 시장을 분석하여 자동으로 종목을 선택하고 매매합니다.'}
-            </p>
+          positionCount === 0 ? (
+            <div className="text-sm text-slate-500 py-2 space-y-1.5">
+              <p>
+                {!status.running
+                  ? '봇을 시작하면 시장을 분석하여 자동으로 종목을 선택하고 매매합니다.'
+                  : isFutures && latestEntryBlock
+                    ? '선물 후보는 감지됐지만 실제 포지션은 아직 열리지 않았습니다.'
+                    : '진입 조건을 탐색 중... 스캔 후 조건 충족 종목에 자동 진입합니다.'}
+              </p>
+              {status.running && isFutures && latestEntryBlock && (
+                <p className="text-xs text-amber-300/90 break-words">
+                  최근 차단: <span className="font-mono text-slate-300">{latestEntryBlock.symbol}</span>
+                  {latestEntryBlock.side && <span> · {latestEntryBlock.side.toUpperCase()}</span>}
+                  {latestEntryBlock.score !== undefined && <span> · 점수 {latestEntryBlock.score}</span>}
+                  <span> · {latestEntryBlock.reason}</span>
+                </p>
+              )}
+              {status.running && isFutures && !latestEntryBlock && topScan && (
+                <p className="text-xs text-slate-500">
+                  최근 후보: <span className="font-mono text-slate-300">{topScan.symbol}</span>
+                  {topScan.side && <span> · {topScan.side.toUpperCase()}</span>}
+                  <span> · 점수 {topScan.score}</span>
+                </p>
+              )}
+            </div>
           ) : isFutures ? (
             /* 선물 포지션 카드 */
-            (status.futures_positions ?? []).length === 0 ? (
-              <p className="text-sm text-slate-500 py-2">진입 조건을 탐색 중... 스캔 후 조건 충족 종목에 자동 진입합니다.</p>
-            ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-                {(status.futures_positions ?? []).map(p => (
-                  <FuturesPositionCard key={p.symbol} pos={p} onClick={() => setSelectedFuturesPos(p)} krwRate={krwRate} />
-                ))}
-              </div>
-            )
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+              {futuresPositions.map(p => (
+                <FuturesPositionCard key={p.symbol} pos={p} onClick={() => setSelectedFuturesPos(p)} krwRate={krwRate} />
+              ))}
+            </div>
           ) : (
             /* 현물 포지션 카드 */
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
@@ -1912,7 +1937,9 @@ export default function AutoTradePanel() {
           ) : (
             <div>
               <p className="text-xs text-slate-500 mb-2">
-                RSI(30) + EMA(20) + MACD(30) + 거래량(20) = 최대 100점 · 전략 자동 분류 적용
+                {isFutures
+                  ? '선물: ADX 추세 + BB/ATR 돌파 + MACD/RSI 모멘텀으로 롱/숏 후보만 점수화 · 관망은 진입 제외'
+                  : 'RSI(30) + EMA(20) + MACD(30) + 거래량(20) = 최대 100점 · 전략 자동 분류 적용'}
               </p>
               {status.scan_results.map((r, i) => <ScanRow key={r.symbol} r={r} rank={i + 1} />)}
             </div>

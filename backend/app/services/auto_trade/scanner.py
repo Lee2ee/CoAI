@@ -912,7 +912,7 @@ FUTURES_STRATEGY_STYLE_CONFIGS: dict[str, dict[str, dict]] = {
         "long":     {"sl_pct": 3.5,  "tp_pct": 10.0},
     },
     "futures_momentum": {        # MACD+RSI 모멘텀 — 중간 보유
-        "scalping": {"sl_pct": 0.9,  "tp_pct": 2.2},
+        "scalping": {"sl_pct": 1.1,  "tp_pct": 2.6},
         "short":    {"sl_pct": 1.3,  "tp_pct": 4.0},
         "mid":      {"sl_pct": 2.2,  "tp_pct": 6.5},
         "long":     {"sl_pct": 3.5,  "tp_pct": 11.0},
@@ -942,15 +942,15 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
 
     _empty = {
         "symbol": symbol, "score": 0, "rsi": 50.0, "price": current_price,
-        "signals": [], "strategy_type": "standard", "strategy_label": "표준",
-        "sl_pct": None, "tp_pct": None, "style": style, "side": "long",
+        "signals": ["전략 조건 미충족"], "strategy_type": "no_signal", "strategy_label": "관망",
+        "sl_pct": None, "tp_pct": None, "style": style, "side": None,
         "volume_ratio": 0.0, "price_change_pct": 0.0,
         "mtf_trend": "neutral", "mtf_confirmed": True,
         "adx": 0.0, "mr_score": 0, "mr_signals": [], "bb_mid": 0.0, "bb_lower": 0.0,
         "macd_direction": "neutral", "bb_pos": 0.5, "atr_pct": 1.0,
     }
     if len(df) < 60:
-        return _empty
+        return {**_empty, "signals": ["데이터 부족"]}
 
     close  = df["close"]
     high   = df["high"]
@@ -1123,11 +1123,10 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
         return (sc, sg) if sc >= 20 else (0, [])  # 최소 임계값 미달 → 무효
 
     # ── 최강 후보 선택 ────────────────────────────────────────────────────────
-    # scalping: futures_momentum 제외 (SL 0.9% < SOL 등 변동성 코인 ATR → 노이즈 손절 빈발)
-    #           futures_trend도 제외 (ADX 추세 신호는 5m봉에서 후발 진입 위험)
-    #           scalping은 futures_breakout 전용 (변동성 돌파 = 빠른 진입·청산에 최적)
+    # scalping: ADX 추세 신호는 5m봉에서 후발 진입 위험이 커서 제외.
+    #           돌파 + MACD/RSI 모멘텀을 함께 보되, 리스크 필터에서 최종 차단한다.
     _allowed_strats = (
-        [("futures_breakout", _breakout)]
+        [("futures_breakout", _breakout), ("futures_momentum", _momentum)]
         if style == "scalping"
         else [("futures_trend", _trend), ("futures_breakout", _breakout), ("futures_momentum", _momentum)]
     )
@@ -1152,7 +1151,27 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
     _f_atr_pct = round(atr / price_now * 100, 2) if price_now > 0 and atr > 0 else 1.0
 
     if not candidates:
+        no_signal_reasons: list[str] = []
+        if adx < 20:
+            no_signal_reasons.append(f"ADX 약함 ({adx:.1f})")
+        elif adx < 25:
+            no_signal_reasons.append(f"ADX 추세 임계 미달 ({adx:.1f} < 25)")
+        if vol_ratio < 0.8:
+            no_signal_reasons.append(f"거래량 확인 부족 ({vol_ratio:.1f}x)")
+        elif vol_ratio < 1.2:
+            no_signal_reasons.append(f"거래량 평균 수준 ({vol_ratio:.1f}x)")
+        if bb_upper > 0 and bb_lower > 0 and bb_lower <= price_now <= bb_upper:
+            no_signal_reasons.append("BB 돌파 없음")
+        if not crossed_up and not crossed_down and abs(macd_hist) <= abs(macd_line) * 0.05:
+            no_signal_reasons.append("MACD 방향성 약함")
+        if rsi >= 70:
+            no_signal_reasons.append(f"RSI 과열, 추격 보류 ({rsi:.1f})")
+        elif rsi <= 30:
+            no_signal_reasons.append(f"RSI 과매도, 반전 확인 대기 ({rsi:.1f})")
+        if not no_signal_reasons:
+            no_signal_reasons.append("전략 조건 미충족")
         return {**_empty, "rsi": round(rsi, 1), "adx": round(adx, 1),
+                "signals": no_signal_reasons[:4],
                 "volume_ratio": round(vol_ratio, 2),
                 "bb_mid": round(bb_mid, 2), "bb_lower": round(bb_lower, 2),
                 "price_change_pct": round(price_change_pct, 2),

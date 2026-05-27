@@ -210,7 +210,7 @@ export interface AutoBotTradeLog {
   strategy_type?: string
   strategy_label?: string
   market_type?: 'spot' | 'futures'
-  side?: 'long' | 'short'
+  side?: 'long' | 'short' | null
   leverage?: number
 }
 
@@ -226,7 +226,7 @@ export interface ScanResult {
   tp_pct: number | null
   mtf_trend?: 'bullish' | 'bearish' | 'neutral'
   mtf_confirmed?: boolean
-  side?: 'long' | 'short'
+  side?: 'long' | 'short' | null
 }
 
 export interface AutoBotSettings {

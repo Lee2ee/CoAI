@@ -1,10 +1,12 @@
 import { defineConfig, loadEnv, createLogger } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// WS 프록시 ECONNRESET 노이즈 제거 (백엔드 재시작 시 정상 발생)
+// 개발 중 백엔드 reload/일시 busy 상태에서 Vite proxy가 터미널에 쏟는 노이즈 완화.
 const logger = createLogger()
 const _suppress = (msg: string) =>
-  msg.includes('ws proxy socket error') || msg.includes('ECONNRESET')
+  msg.includes('proxy error') ||
+  msg.includes('proxy socket error') ||
+  ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT'].some(code => msg.includes(code))
 const _warn = logger.warn.bind(logger)
 const _error = logger.error.bind(logger)
 logger.warn  = (msg, opts) => { if (!_suppress(msg)) _warn(msg, opts) }
@@ -26,6 +28,11 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: `http://127.0.0.1:${backendPort}`,
           changeOrigin: true,
+          timeout: 15_000,
+          proxyTimeout: 15_000,
+          configure: (proxy) => {
+            proxy.on('error', () => {})
+          },
         },
         '/ws': {
           target: `ws://127.0.0.1:${backendPort}`,

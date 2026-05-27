@@ -2925,8 +2925,14 @@ class AutoTradeBot:
 
     async def _enter_futures_from_scan(self, scan_results: list[dict]):
         """선물 스캔 결과에서 신규 포지션 진입."""
-        # 선물은 레버리지 특성상 신호 품질을 더 엄격하게 적용 (최소 60점)
-        min_score = max(self.settings["min_score"], 60)
+        # 선물은 현물 프리셋 min_score를 그대로 쓰면 scalping(62점)에서 진입이 거의 막힌다.
+        # 스타일별 선물 기준으로 상한을 두고, 리스크/AI 필터에서 최종 진입 품질을 다시 검증한다.
+        futures_min_by_style = {"scalping": 35, "short": 45, "mid": 50, "long": 55}
+        style = self.settings.get("trading_style", "short")
+        min_score = max(30, min(
+            int(self.settings.get("min_score", 48)),
+            futures_min_by_style.get(style, 48),
+        ))
         candidates = [
             r for r in scan_results
             if r["score"] >= min_score
@@ -2970,6 +2976,14 @@ class AutoTradeBot:
         if symbol in self._futures_positions:
             logger.info(f"AutoBot 선물: {symbol} 이미 포지션 보유, 진입 스킵")
             return
+        if not self._futures_connector:
+            self._record_no_trade(symbol, {
+                "reason": "futures connector unavailable",
+                "score": scan_result.get("score", 0),
+                "side": side,
+                "leverage": leverage,
+            })
+            return
 
         try:
             price = await asyncio.wait_for(
@@ -2977,6 +2991,12 @@ class AutoTradeBot:
             )
         except Exception as e:
             logger.warning(f"AutoBot 선물: {symbol} 마크가격 조회 실패 ({e})")
+            self._record_no_trade(symbol, {
+                "reason": f"mark price fetch failed ({e})",
+                "score": scan_result.get("score", 0),
+                "side": side,
+                "leverage": leverage,
+            })
             return
         logger.info(f"AutoBot 선물 진입 시도: {symbol} side={side} price={price} score={scan_result['score']}")
 
@@ -3004,6 +3024,9 @@ class AutoTradeBot:
                     "symbol":     symbol,
                     "confidence": ai_result["confidence"],
                     "reason":     ai_result["reason"],
+                    "score":      scan_result.get("score", 0),
+                    "side":       side,
+                    "leverage":   leverage,
                 }
                 self._analysis_log.insert(0, log_entry)
                 if len(self._analysis_log) > 20:
@@ -3092,6 +3115,12 @@ class AutoTradeBot:
             )
         except ValueError as e:
             logger.warning(f"AutoBot 선물 진입 실패 {symbol}: {e}")
+            self._record_no_trade(symbol, {
+                "reason": str(e),
+                "score": scan_result.get("score", 0),
+                "side": side,
+                "leverage": leverage,
+            })
             return
 
         fp = self._futures_broker.positions[symbol]
