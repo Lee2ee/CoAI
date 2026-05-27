@@ -2181,7 +2181,7 @@ class AutoTradeBot:
             "at": datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
             "type": "entry_blocked",
             "symbol": symbol,
-            "confidence": 0,
+            "confidence": None,  # 리스크 필터 차단 = AI 미평가, UI에서 "-" 표시
             "reason": f"진입차단: {reason}",
             "score": detail.get("score", 0),
             "side": detail.get("side"),
@@ -2284,6 +2284,7 @@ class AutoTradeBot:
                 risk_detail = {
                     **risk_detail,
                     "reason": f"risk-sized amount below minimum ({invest_krw:.2f} < {min_invest})",
+                    "score": scan_result.get("score", 0),
                 }
                 self._record_no_trade(symbol, risk_detail)
                 return

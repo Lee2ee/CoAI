@@ -371,8 +371,17 @@ function SettingsModal({
                         onChange={e => set('leverage', Number(e.target.value))}
                         className="w-full accent-amber-500"
                       />
-                      <div className="flex justify-between text-xs text-slate-600 mt-0.5">
-                        <span>1x</span><span>10x</span><span>20x</span><span>50x</span>
+                      <div className="relative text-xs text-slate-600 mt-0.5" style={{ height: '16px' }}>
+                        {([1, 10, 20, 50] as const).map((v, i) => (
+                          <span
+                            key={v}
+                            className="absolute"
+                            style={{
+                              left: `${(v - 1) / (50 - 1) * 100}%`,
+                              transform: i === 0 ? 'none' : i === 3 ? 'translateX(-100%)' : 'translateX(-50%)',
+                            }}
+                          >{v}x</span>
+                        ))}
                       </div>
                       <p className="text-xs text-slate-500 mt-1">
                         손절 {form.stop_loss_pct ?? 2.5}% 기준 안전 상한: <span className={willAdjust ? 'text-down' : 'text-up'}>{maxSafeLev}x</span>
@@ -2117,9 +2126,15 @@ function AiLogEntry({ entry }: { entry: AiAnalysisLogEntry }) {
             <div className="flex items-center gap-2 flex-wrap">
               <span className="font-medium text-slate-200">진입 차단</span>
               <span className="text-slate-300 font-mono">{entry.symbol}</span>
-              <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">
-                신뢰도 {entry.confidence}%
-              </span>
+              {entry.confidence != null ? (
+                <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">
+                  신뢰도 {entry.confidence}%
+                </span>
+              ) : (
+                <span className="px-1.5 py-0.5 rounded bg-slate-700/50 text-slate-500">
+                  신뢰도 -
+                </span>
+              )}
             </div>
             <p className="text-slate-400 mt-1">{entry.reason}</p>
           </div>
