@@ -564,9 +564,9 @@ def _score(df: pd.DataFrame, symbol: str, style: str = "short", htf_df: Optional
         volume_breakout = False
         vol_pts = 0
         vol_ratio_val = 0.0
-        if len(volume) >= 21:
-            vol_avg = float(volume.iloc[-21:-1].mean())
-            vol_now = float(volume.iloc[-1])
+        if len(volume) >= 22:
+            vol_avg = float(volume.iloc[-22:-2].mean())
+            vol_now = float(volume.iloc[-2])
             if vol_avg > 0:
                 ratio = vol_now / vol_avg
                 vol_ratio_val = ratio
@@ -1008,9 +1008,16 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
     atr_avg = float(atr_s.iloc[-14:-1].mean()) if atr_s is not None and len(atr_s) >= 14 else atr
     atr_expanding = atr > atr_avg * 1.2 if atr_avg > 0 else False
 
-    vol_avg   = float(volume.iloc[-21:-1].mean()) if len(volume) >= 21 else 1.0
-    vol_now   = float(volume.iloc[-1])
-    vol_ratio = vol_now / vol_avg if vol_avg > 0 else 1.0
+    vol_avg = float(volume.iloc[-21:-1].mean()) if len(volume) >= 21 else 1.0
+    vol_now = float(volume.iloc[-1])
+    # Bybit API lag: 방금 닫힌 봉의 volume을 아직 확정하지 않고 0으로 반환하는 경우가 있음.
+    # vol_now=0이면 neutral(1.0) 처리 — 스코어 페널티 없이 보너스도 없음.
+    # vol_now=0을 그대로 두면 vol_ratio=0.0이 되어 volume 보너스를 못 받아
+    # 본래 60점 이상이었을 신호도 60 미만으로 떨어져 진입 차단됨.
+    if vol_avg > 0 and vol_now > 0:
+        vol_ratio = vol_now / vol_avg
+    else:
+        vol_ratio = 1.0  # neutral: no bonus, no penalty
     price_now = float(close.iloc[-1])
     price_change_pct = float((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100) if len(close) >= 2 else 0.0
 
@@ -1130,12 +1137,21 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
         if style == "scalping"
         else [("futures_trend", _trend), ("futures_breakout", _breakout), ("futures_momentum", _momentum)]
     )
+    # 전략별 이론적 최대 점수 (정규화 기준)
+    _STRAT_MAX_SCORE = {
+        "futures_trend":     100,  # ADX35+DMI15+EMA20+RSI20+vol10
+        "futures_breakout":   90,  # BB30+RSI15+vol30+ATR15
+        "futures_momentum":   80,  # MACD30+RSI20+EMA10+vol20
+    }
     candidates: list[tuple[str, str, int, list[str]]] = []
     for strat, fn in _allowed_strats:
         for side in ("long", "short"):
             sc, sg = fn(side)
             if sc > 0:
-                candidates.append((strat, side, sc, sg))
+                # 100점 기준으로 정규화하여 전략 간 공정 비교
+                max_sc = _STRAT_MAX_SCORE.get(strat, 100)
+                normalized_sc = round(sc / max_sc * 100)
+                candidates.append((strat, side, normalized_sc, sg))
 
     # ── 선물 공통 파생 지표 ────────────────────────────────────────────────
     _f_macd_dir = (
@@ -1180,6 +1196,23 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
     strategy_type, side, score, signals = max(candidates, key=lambda x: x[2])
     cfg = FUTURES_STRATEGY_STYLE_CONFIGS.get(strategy_type, {}).get(style, {})
 
+    # EMA 배열로 중기 추세 판단 (상위 타임프레임 대용)
+    # e20 > e50 > e100 → 상승추세, e20 < e50 < e100 → 하락추세
+    if e20 > 0 and e50 > 0 and e100 > 0:
+        if e20 > e50 > e100:
+            _mtf_trend = "bullish"
+        elif e20 < e50 < e100:
+            _mtf_trend = "bearish"
+        else:
+            _mtf_trend = "neutral"
+    else:
+        _mtf_trend = "neutral"
+    # 신호 방향과 EMA 추세가 일치하는지 확인
+    _mtf_confirmed = (
+        (side == "long"  and _mtf_trend in ("bullish", "neutral")) or
+        (side == "short" and _mtf_trend in ("bearish", "neutral"))
+    )
+
     return {
         "symbol":           symbol,
         "score":            score,
@@ -1194,8 +1227,8 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
         "side":             side,
         "volume_ratio":     round(vol_ratio, 2),
         "price_change_pct": round(price_change_pct, 2),
-        "mtf_trend":        "bullish" if side == "long" else "bearish",
-        "mtf_confirmed":    True,
+        "mtf_trend":        _mtf_trend,
+        "mtf_confirmed":    _mtf_confirmed,
         "adx":              round(adx, 1),
         "mr_score":         0,
         "mr_signals":       [],

@@ -118,6 +118,40 @@ async def update_settings(
     return {"ok": True, "settings": bot.settings}
 
 
+@router.get("/spot-settings")
+async def get_spot_settings(user: User = Depends(get_current_user)):
+    """현물 전용 설정 조회"""
+    return get_auto_bot()._spot_settings
+
+
+@router.get("/futures-settings")
+async def get_futures_settings(user: User = Depends(get_current_user)):
+    """선물 전용 설정 조회"""
+    return get_auto_bot()._futures_settings
+
+
+@router.patch("/spot-settings")
+async def patch_spot_settings(
+    settings: dict,
+    user: User = Depends(get_current_user),
+):
+    """현물 전용 설정 업데이트 (활성 모드면 즉시 반영)"""
+    bot = get_auto_bot()
+    bot.update_mode_settings("spot", settings)
+    return {"ok": True, "settings": bot._spot_settings}
+
+
+@router.patch("/futures-settings")
+async def patch_futures_settings(
+    settings: dict,
+    user: User = Depends(get_current_user),
+):
+    """선물 전용 설정 업데이트 (활성 모드면 즉시 반영)"""
+    bot = get_auto_bot()
+    bot.update_mode_settings("futures", settings)
+    return {"ok": True, "settings": bot._futures_settings}
+
+
 @router.patch("/balance")
 async def set_paper_balance(
     body: dict = Body(...),

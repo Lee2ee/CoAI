@@ -147,11 +147,39 @@ function SettingsModal({
   onClose,
 }: {
   settings: AutoBotStatus['settings']
-  onSave: (s: Partial<AutoBotStatus['settings']>) => void
+  onSave: (s: Partial<AutoBotStatus['settings']>, mode: 'spot' | 'futures') => void
   onClose: () => void
 }) {
-  const [form, setForm] = useState({ ...settings })
+  const [settingsTab, setSettingsTab] = useState<'spot' | 'futures'>(
+    settings.market_type ?? 'spot'
+  )
+  const [spotForm, setSpotForm] = useState({ ...settings })
+  const [futuresForm, setFuturesForm] = useState({ ...settings })
   const TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d']
+
+  // 현물/선물 설정 독립 로드
+  const { data: spotSettingsData } = useQuery<Record<string, unknown>>({
+    queryKey: ['spot-settings'],
+    queryFn: async () => (await api.get('/auto-bot/spot-settings')).data,
+    staleTime: 30_000,
+  })
+  const { data: futuresSettingsData } = useQuery<Record<string, unknown>>({
+    queryKey: ['futures-settings'],
+    queryFn: async () => (await api.get('/auto-bot/futures-settings')).data,
+    staleTime: 30_000,
+  })
+
+  useEffect(() => {
+    if (spotSettingsData) setSpotForm(f => ({ ...f, ...spotSettingsData, market_type: 'spot' }))
+  }, [spotSettingsData])
+
+  useEffect(() => {
+    if (futuresSettingsData) setFuturesForm(f => ({ ...f, ...futuresSettingsData, market_type: 'futures' }))
+  }, [futuresSettingsData])
+
+  // 활성 탭에 따라 form/setForm을 분기
+  const form = settingsTab === 'spot' ? spotForm : futuresForm
+  const setForm = settingsTab === 'spot' ? setSpotForm : setFuturesForm
 
   useEffect(() => {
     document.body.style.overflow = 'hidden'
@@ -257,9 +285,25 @@ function SettingsModal({
         className="bg-surface-800 border border-surface-700 rounded-xl shadow-2xl w-full max-w-md flex flex-col max-h-[90vh]"
         onClick={e => e.stopPropagation()}
       >
-        {/* ── 고정 타이틀 ── */}
-        <div className="px-5 pt-5 pb-4 border-b border-surface-700 flex-shrink-0">
-          <h3 className="font-semibold text-slate-100">자동매매 설정</h3>
+        {/* ── 고정 타이틀 + 현물/선물 탭 ── */}
+        <div className="px-5 pt-5 border-b border-surface-700 flex-shrink-0">
+          <h3 className="font-semibold text-slate-100 mb-3">자동매매 설정</h3>
+          <div className="flex gap-1 mb-0">
+            {(['spot', 'futures'] as const).map(tab => (
+              <button
+                key={tab}
+                onClick={() => setSettingsTab(tab)}
+                className={clsx(
+                  'px-4 py-2 text-sm font-medium rounded-t-lg border-b-2 transition-colors',
+                  settingsTab === tab
+                    ? 'border-brand-500 text-brand-400 bg-brand-500/10'
+                    : 'border-transparent text-slate-500 hover:text-slate-300'
+                )}
+              >
+                {tab === 'spot' ? '현물 설정' : '선물 설정'}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* ── 전체 스크롤 영역 ── */}
@@ -271,18 +315,19 @@ function SettingsModal({
             <div className="grid grid-cols-3 gap-1.5">
               {(['upbit', 'binance', 'bybit'] as const).map(ex => {
                 const connected = connectedExchanges.has(ex)
+                // 선물 탭에서는 업비트 비활성화
+                const disabled = !connected || (settingsTab === 'futures' && ex === 'upbit')
+                const disabledReason = !connected
+                  ? `${EXCHANGE_LABEL[ex]} ${isPaperMode ? '모의투자' : '실거래'} 계정이 등록되지 않았습니다. 거래소 계정 메뉴에서 API 키를 등록하세요.`
+                  : '업비트는 현물 거래만 지원합니다.'
                 return (
                   <button
                     key={ex}
-                    disabled={!connected}
-                    onClick={() => connected && setForm(f => ({
-                      ...f,
-                      exchange_id: ex,
-                      ...(ex === 'upbit' ? { market_type: 'spot' } : {}),
-                    }))}
+                    disabled={disabled}
+                    onClick={() => !disabled && setForm(f => ({ ...f, exchange_id: ex }))}
                     className={clsx(
                       'py-2 rounded-lg text-xs font-medium border transition-colors',
-                      !connected
+                      disabled
                         ? 'bg-surface-800 border-surface-700 text-slate-600 cursor-not-allowed'
                         : (form.exchange_id ?? 'upbit') === ex
                           ? `bg-brand-500/20 border-brand-500 ${EXCHANGE_COLOR[ex]}`
@@ -291,12 +336,7 @@ function SettingsModal({
                   >
                     <span className="flex items-center justify-center gap-1">
                       {EXCHANGE_LABEL[ex]}
-                      {!connected && (
-                        <Tooltip
-                          text={`${EXCHANGE_LABEL[ex]} ${isPaperMode ? '모의투자' : '실거래'} 계정이 등록되지 않았습니다. 거래소 계정 메뉴에서 API 키를 등록하세요.`}
-                          iconOnly
-                        />
-                      )}
+                      {disabled && <Tooltip text={disabledReason} iconOnly />}
                     </span>
                   </button>
                 )
@@ -304,118 +344,82 @@ function SettingsModal({
             </div>
           </div>
 
-          {/* 거래 모드 */}
-          <div>
-            <p className="text-xs text-slate-400 font-medium mb-2">거래 모드</p>
-            <div className="grid grid-cols-2 gap-1.5">
-              {(['spot', 'futures'] as const).map(mt => {
-                const isUpbit = (form.exchange_id ?? 'upbit') === 'upbit'
-                const isFuturesDisabled = mt === 'futures' && isUpbit
+          {/* 선물 탭 전용: 레버리지 + 마진 모드 */}
+          {settingsTab === 'futures' && (
+            <div className="space-y-3">
+              {(() => {
+                const slPct = (form.stop_loss_pct ?? 1.5) / 100
+                const capSl   = Math.floor(1.0 / (slPct + 0.005 + 0.005))
+                const capWarn = Math.floor(1.0 / (0.020  + 0.005 + 0.005))
+                const maxSafeLev = Math.max(1, Math.min(capSl, capWarn))
+                const currentLev = form.leverage ?? 8
+                const willAdjust = currentLev > maxSafeLev
                 return (
-                  <button
-                    key={mt}
-                    disabled={isFuturesDisabled}
-                    onClick={() => !isFuturesDisabled && set('market_type', mt)}
-                    className={clsx(
-                      'py-2 rounded-lg text-xs font-medium border transition-colors',
-                      isFuturesDisabled
-                        ? 'bg-surface-800 border-surface-700 text-slate-600 cursor-not-allowed'
-                        : (form.market_type ?? 'spot') === mt
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <p className="text-xs text-slate-400 flex items-center gap-1">
+                        레버리지
+                        <Tooltip text="내 자산의 N배 규모로 포지션을 열 수 있는 배율입니다. 수익과 손실이 모두 N배로 증폭되며 높을수록 청산 위험이 커집니다." iconOnly />
+                      </p>
+                      <div className="flex items-center gap-2">
+                        {willAdjust && <span className="text-xs text-down">→ {maxSafeLev}x 자동조정</span>}
+                        <span className="text-xs font-bold text-amber-400">{currentLev}x</span>
+                      </div>
+                    </div>
+                    <input
+                      type="range" min={1} max={50} step={1}
+                      value={currentLev}
+                      onChange={e => set('leverage', Number(e.target.value))}
+                      className="w-full accent-amber-500"
+                    />
+                    <div className="relative text-xs text-slate-600 mt-0.5" style={{ height: '16px' }}>
+                      {([1, 10, 20, 50] as const).map((v, i) => (
+                        <span key={v} className="absolute" style={{
+                          left: `${(v - 1) / (50 - 1) * 100}%`,
+                          transform: i === 0 ? 'none' : i === 3 ? 'translateX(-100%)' : 'translateX(-50%)',
+                        }}>{v}x</span>
+                      ))}
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">
+                      손절 {form.stop_loss_pct ?? 1.5}% 기준 안전 상한: <span className={willAdjust ? 'text-down' : 'text-up'}>{maxSafeLev}x</span>
+                      {willAdjust && <span className="text-slate-500"> (초과 시 봇이 자동 하향)</span>}
+                    </p>
+                  </div>
+                )
+              })()}
+              <div>
+                <p className="text-xs text-slate-400 mb-1.5 flex items-center gap-1">
+                  마진 모드
+                  <Tooltip text="청산 위험이 발생했을 때 손실을 어디서 충당하는지 결정합니다." iconOnly />
+                </p>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {(['cross', 'isolated'] as const).map(mm => (
+                    <button
+                      key={mm}
+                      onClick={() => set('margin_mode', mm)}
+                      className={clsx(
+                        'py-1.5 rounded text-xs font-medium border transition-colors',
+                        (form.margin_mode ?? 'cross') === mm
                           ? 'bg-brand-500/20 border-brand-500 text-brand-400'
                           : 'bg-surface-700 border-surface-600 text-slate-400 hover:text-slate-200'
-                    )}
-                  >
-                    <Tooltip
-                      text={isFuturesDisabled
-                        ? '업비트는 현물 거래만 지원합니다. 선물 거래는 Binance 또는 Bybit을 선택하세요.'
-                        : mt === 'spot'
-                          ? '실제 암호화폐를 직접 매수·매도합니다. 레버리지 없이 보유 자산 한도 내에서 거래합니다.'
-                          : '미래 가격을 현재 약정하는 파생상품 거래입니다. 레버리지로 증폭 거래가 가능하며 롱·숏 양방향 거래를 지원합니다.'}
+                      )}
                     >
-                      {mt === 'spot' ? '현물 (Spot)' : '선물 (Futures)'}
-                    </Tooltip>
-                  </button>
-                )
-              })}
-            </div>
-            {(form.exchange_id ?? 'upbit') === 'upbit' && (
-              <p className="text-xs text-slate-500 mt-1.5">업비트는 현물 거래만 지원합니다.</p>
-            )}
-            {(form.market_type ?? 'spot') === 'futures' && (
-              <div className="mt-3 space-y-3">
-                {/* 레버리지 */}
-                {(() => {
-                  const slPct = (form.stop_loss_pct ?? 2.5) / 100
-                  const capSl   = Math.floor(1.0 / (slPct + 0.005 + 0.005))
-                  const capWarn = Math.floor(1.0 / (0.020  + 0.005 + 0.005))  // ≈33x
-                  const maxSafeLev = Math.max(1, Math.min(capSl, capWarn))
-                  const currentLev = form.leverage ?? 5
-                  const willAdjust = currentLev > maxSafeLev
-                  return (
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <p className="text-xs text-slate-400 flex items-center gap-1">
-                          레버리지
-                          <Tooltip text="내 자산의 N배 규모로 포지션을 열 수 있는 배율입니다. 5x이면 100달러로 500달러 규모 거래 가능. 수익과 손실이 모두 N배로 증폭되며 높을수록 청산 위험이 커집니다." iconOnly />
-                        </p>
-                        <div className="flex items-center gap-2">
-                          {willAdjust && (
-                            <span className="text-xs text-down">→ {maxSafeLev}x 자동조정</span>
-                          )}
-                          <span className="text-xs font-bold text-amber-400">{currentLev}x</span>
-                        </div>
-                      </div>
-                      <input
-                        type="range" min={1} max={50} step={1}
-                        value={currentLev}
-                        onChange={e => set('leverage', Number(e.target.value))}
-                        className="w-full accent-amber-500"
-                      />
-                      <div className="flex justify-between text-xs text-slate-600 mt-0.5">
-                        <span>1x</span><span>10x</span><span>20x</span><span>50x</span>
-                      </div>
-                      <p className="text-xs text-slate-500 mt-1">
-                        손절 {form.stop_loss_pct ?? 2.5}% 기준 안전 상한: <span className={willAdjust ? 'text-down' : 'text-up'}>{maxSafeLev}x</span>
-                        {willAdjust && <span className="text-slate-500"> (초과 시 봇이 자동 하향)</span>}
-                      </p>
-                    </div>
-                  )
-                })()}
-                {/* 마진 모드 */}
-                <div>
-                  <p className="text-xs text-slate-400 mb-1.5 flex items-center gap-1">
-                    마진 모드
-                    <Tooltip text="청산 위험이 발생했을 때 손실을 어디서 충당하는지 결정합니다." iconOnly />
-                  </p>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {(['cross', 'isolated'] as const).map(mm => (
-                      <button
-                        key={mm}
-                        onClick={() => set('margin_mode', mm)}
-                        className={clsx(
-                          'py-1.5 rounded text-xs font-medium border transition-colors',
-                          (form.margin_mode ?? 'cross') === mm
-                            ? 'bg-brand-500/20 border-brand-500 text-brand-400'
-                            : 'bg-surface-700 border-surface-600 text-slate-400 hover:text-slate-200'
-                        )}
+                      <Tooltip
+                        text={mm === 'cross'
+                          ? '교차 마진: 계좌 전체 잔고가 증거금으로 사용됩니다.'
+                          : '격리 마진: 이 포지션에만 별도 증거금을 배정합니다. 손실이 해당 증거금으로만 제한됩니다.'}
                       >
-                        <Tooltip
-                          text={mm === 'cross'
-                            ? '교차 마진: 계좌 전체 잔고가 증거금으로 사용됩니다. 청산 가격은 낮아지지만, 손실이 계좌 전체 자산으로 확산될 수 있습니다.'
-                            : '격리 마진: 이 포지션에만 별도 증거금을 배정합니다. 청산 시 손실이 해당 증거금으로만 제한되어 계좌 전체를 보호할 수 있습니다.'}
-                        >
-                          {mm === 'cross' ? 'Cross (교차)' : 'Isolated (격리)'}
-                        </Tooltip>
-                      </button>
-                    ))}
-                  </div>
+                        {mm === 'cross' ? 'Cross (교차)' : 'Isolated (격리)'}
+                      </Tooltip>
+                    </button>
+                  ))}
                 </div>
-                <p className="text-xs text-amber-400/80 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1.5">
-                  레버리지가 높을수록 청산 위험이 증가합니다. 모의거래로 먼저 테스트하세요.
-                </p>
               </div>
-            )}
-          </div>
+              <p className="text-xs text-amber-400/80 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1.5">
+                레버리지가 높을수록 청산 위험이 증가합니다. 모의거래로 먼저 테스트하세요.
+              </p>
+            </div>
+          )}
 
           {/* 매매 스타일 */}
           <div className="border-t border-surface-700 pt-4">
@@ -567,8 +571,8 @@ function SettingsModal({
             </div>
           </div>
 
-          {/* 물타기 / 추매 / 피라미딩 — 현물 전용 */}
-          {(form.market_type ?? 'spot') === 'spot' && (<>
+          {/* 물타기 / 추매 / 피라미딩 — 현물 탭 전용 */}
+          {settingsTab === 'spot' && (<>
             {/* 물타기 */}
             <div className="border-t border-surface-700 pt-4">
               <div className="flex items-center justify-between mb-2">
@@ -644,7 +648,7 @@ function SettingsModal({
           </p>
           <div className="flex gap-2">
             <button onClick={onClose} className="btn-ghost flex-1 text-sm">취소</button>
-            <button onClick={() => { onSave(form); onClose() }} className="btn-primary flex-1 text-sm">저장</button>
+            <button onClick={() => { onSave(form, settingsTab); onClose() }} className="btn-primary flex-1 text-sm">저장</button>
           </div>
         </div>
       </div>
@@ -1417,6 +1421,20 @@ export default function AutoTradePanel() {
     mutationFn: (s: object) => api.patch('/auto-bot/settings', s),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['auto-bot-status'] }),
   })
+  const spotSettingsMut = useMutation({
+    mutationFn: (s: object) => api.patch('/auto-bot/spot-settings', s),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['auto-bot-status'] })
+      qc.invalidateQueries({ queryKey: ['spot-settings'] })
+    },
+  })
+  const futuresSettingsMut = useMutation({
+    mutationFn: (s: object) => api.patch('/auto-bot/futures-settings', s),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['auto-bot-status'] })
+      qc.invalidateQueries({ queryKey: ['futures-settings'] })
+    },
+  })
   const balanceMut = useMutation({
     mutationFn: (krw: number) => api.patch('/auto-bot/balance', { krw }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['auto-bot-status'] }),
@@ -1466,7 +1484,19 @@ export default function AutoTradePanel() {
       {showSettings && (
         <SettingsModal
           settings={status.settings}
-          onSave={s => settingsMut.mutate(s)}
+          onSave={(s, mode) => {
+            // 공유 설정 (거래소, 모드, 모의/실거래) → 기존 settingsMut
+            // market_type은 탭 기반으로 자동 결정
+            const shared: Record<string, unknown> = {
+              market_type: mode,  // 현물 탭 저장 → spot, 선물 탭 저장 → futures
+            }
+            if (s.exchange_id !== undefined) shared.exchange_id = s.exchange_id
+            if (s.is_paper !== undefined) shared.is_paper = s.is_paper
+            settingsMut.mutate(shared)
+            // 모드별 설정 → 해당 엔드포인트
+            if (mode === 'spot') spotSettingsMut.mutate(s)
+            else futuresSettingsMut.mutate(s)
+          }}
           onClose={() => setShowSettings(false)}
         />
       )}
@@ -2144,9 +2174,15 @@ function AiLogEntry({ entry }: { entry: AiAnalysisLogEntry }) {
             <div className="flex items-center gap-2 flex-wrap">
               <span className="font-medium text-slate-200">진입 차단</span>
               <span className="text-slate-300 font-mono">{entry.symbol}</span>
-              <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">
-                신뢰도 {entry.confidence}%
-              </span>
+              {entry.confidence != null ? (
+                <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">
+                  신뢰도 {entry.confidence}%
+                </span>
+              ) : (
+                <span className="px-1.5 py-0.5 rounded bg-slate-700/50 text-slate-500">
+                  신뢰도 -
+                </span>
+              )}
             </div>
             <p className="text-slate-400 mt-1">{entry.reason}</p>
           </div>
