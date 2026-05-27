@@ -1197,7 +1197,7 @@ class AutoTradeBot:
         import time
         if not self.settings.get("ai_regime_detection", True):
             return
-        if time.time() - self._last_regime_at < 900:   # 15분 이내면 스킵
+        if time.time() - self._last_regime_at < 300:   # 5분 이내면 스킵
             return
 
         try:
@@ -2941,16 +2941,29 @@ class AutoTradeBot:
 
         # 시장 국면과 반대 방향 진입 차단
         # 상승장 → 숏 금지 / 하락장 → 롱 금지 (ranging/unknown 은 양방향 허용)
+        # 단, 개별 종목 점수 80 이상이면 강한 신호로 간주하여 허용 (국면 판단 오류 방어)
         regime = self._current_regime.get("regime", "ranging")
         if regime in ("uptrend", "downtrend"):
             blocked_side = "short" if regime == "uptrend" else "long"
             before = len(candidates)
-            candidates = [c for c in candidates if c.get("side", "long") != blocked_side]
+            regime_blocked = [c for c in candidates if c.get("side", "long") == blocked_side and c["score"] < 80]
+            candidates    = [c for c in candidates if c.get("side", "long") != blocked_side or c["score"] >= 80]
             blocked = before - len(candidates)
-            if blocked:
+            if regime_blocked:
                 logger.info(
-                    f"AutoBot 선물 국면 필터: {regime} — {blocked_side} {blocked}개 진입 차단"
+                    f"AutoBot 선물 국면 필터: {regime} — {blocked_side} {blocked}개 진입 차단 "
+                    f"(점수 80 미만), 고점수 {before - len(regime_blocked) - sum(1 for c in candidates if c.get('side') != blocked_side)}개 허용"
                 )
+                for bc in regime_blocked:
+                    self._analysis_log.insert(0, {
+                        "at":         datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+                        "type":       "entry_blocked",
+                        "symbol":     bc["symbol"],
+                        "confidence": 0,
+                        "reason":     f"NO_TRADE: 국면 필터 — {regime} (롱 차단, 점수 {bc['score']})",
+                    })
+                if len(self._analysis_log) > 20:
+                    self._analysis_log = self._analysis_log[:20]
 
         logger.info(
             f"AutoBot _enter_futures_from_scan: 전체={len(scan_results)}개, "
