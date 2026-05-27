@@ -93,18 +93,39 @@ async def ws_tickers(
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
     connector = ExchangeConnector(exchange_id=exchange, is_paper=True)
 
+    backoff = BACKOFF_MIN
+    last_error: str = ""
+
     try:
         while True:
-            tasks = [
-                asyncio.wait_for(connector.fetch_ticker(sym), timeout=10)
-                for sym in symbol_list
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            successful = 0
-            for sym, result in zip(symbol_list, results):
-                if isinstance(result, Exception):
+            error_sent = False
+            try:
+                tickers = await asyncio.wait_for(
+                    connector.fetch_tickers(symbol_list),
+                    timeout=10,
+                )
+            except asyncio.TimeoutError:
+                tickers = {}
+                err = f"{exchange} 요청 타임아웃"
+                if err != last_error:
+                    logger.warning(f"WS tickers timeout: {','.join(symbol_list)}@{exchange}")
+                    last_error = err
+                await websocket.send_json({"type": "error", "message": err, "backoff": backoff})
+                error_sent = True
+            except Exception as e:
+                tickers = {}
+                err = str(e).split("\n")[0][:120]
+                if err != last_error:
+                    logger.warning(f"WS tickers error ({exchange}): {err}")
+                    last_error = err
+                await websocket.send_json({"type": "error", "message": err, "backoff": backoff})
+                error_sent = True
+
+            successful = len(tickers)
+            for sym in symbol_list:
+                result = tickers.get(sym)
+                if not result:
                     continue
-                successful += 1
                 await websocket.send_json({
                     "type": "ticker",
                     "symbol": sym,
@@ -115,8 +136,14 @@ async def ws_tickers(
                     "volume": result.get("quoteVolume") or 0,
                 })
             if successful == 0:
-                await websocket.send_json({"type": "error", "message": f"{exchange} 시세 조회 실패"})
-            await asyncio.sleep(TICK_INTERVAL)
+                if not error_sent:
+                    await websocket.send_json({"type": "error", "message": f"{exchange} 시세 조회 실패"})
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * BACKOFF_MULT, BACKOFF_MAX)
+            else:
+                backoff = BACKOFF_MIN
+                last_error = ""
+                await asyncio.sleep(TICK_INTERVAL)
 
     except WebSocketDisconnect:
         pass

@@ -19,14 +19,16 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     customLogger: logger,
     server: {
+      host: '127.0.0.1',
       port: frontendPort,
+      strictPort: true,
       proxy: {
         '/api': {
-          target: `http://localhost:${backendPort}`,
+          target: `http://127.0.0.1:${backendPort}`,
           changeOrigin: true,
         },
         '/ws': {
-          target: `ws://localhost:${backendPort}`,
+          target: `ws://127.0.0.1:${backendPort}`,
           changeOrigin: true,
           ws: true,
           configure: (proxy) => {

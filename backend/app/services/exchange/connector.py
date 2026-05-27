@@ -10,6 +10,7 @@ sandbox 모드는 사용하지 않음:
 """
 import ccxt.async_support as ccxt
 import aiohttp
+import logging
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 
@@ -17,6 +18,7 @@ KST = timezone(timedelta(hours=9))
 from typing import Optional
 import asyncio
 
+logger = logging.getLogger(__name__)
 
 EXCHANGE_CLASSES = {
     "upbit":   ccxt.upbit,
@@ -72,6 +74,7 @@ class ExchangeConnector:
 
         self.is_paper = is_paper
         self.exchange_id = exchange_id
+        self._closed = False
 
         self._exchange = cls({
             "apiKey": api_key,
@@ -207,6 +210,17 @@ class ExchangeConnector:
             return await self._fetch_bybit_ticker(symbol)
         return await self._exchange.fetch_ticker(symbol)
 
+    async def fetch_tickers(self, symbols: list[str]) -> dict[str, dict]:
+        symbols = [symbol for symbol in symbols if symbol]
+        if not symbols:
+            return {}
+        if self.exchange_id == "bybit":
+            return {
+                symbol: await self._fetch_bybit_ticker(symbol)
+                for symbol in symbols
+            }
+        return await self._exchange.fetch_tickers(symbols)
+
     async def _fetch_bybit_ticker(self, symbol: str) -> dict:
         ccxt_symbol = symbol.replace("/", "")  # BTC/USDT → BTCUSDT
         connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
@@ -253,10 +267,22 @@ class ExchangeConnector:
         return await self._exchange.cancel_order(order_id, symbol)
 
     async def close(self):
+        if self._closed:
+            return
+        self._closed = True
         session = getattr(self._exchange, "session", None)
-        await self._exchange.close()
-        if session is not None and not session.closed:
-            await session.close()
+        try:
+            await self._exchange.close()
+        except Exception as e:
+            logger.debug("Exchange close failed (%s): %s", self.exchange_id, e)
+        finally:
+            if session is not None and not session.closed:
+                try:
+                    await session.close()
+                except Exception as e:
+                    logger.debug("Exchange session close failed (%s): %s", self.exchange_id, e)
+            if getattr(self._exchange, "session", None) is session:
+                self._exchange.session = None
 
 
 class PaperBroker:
@@ -449,10 +475,22 @@ class BinanceFuturesConnector:
         }
 
     async def close(self):
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         session = getattr(self._exchange, "session", None)
-        await self._exchange.close()
-        if session is not None and not session.closed:
-            await session.close()
+        try:
+            await self._exchange.close()
+        except Exception as e:
+            logger.debug("Binance futures close failed: %s", e)
+        finally:
+            if session is not None and not session.closed:
+                try:
+                    await session.close()
+                except Exception as e:
+                    logger.debug("Binance futures session close failed: %s", e)
+            if getattr(self._exchange, "session", None) is session:
+                self._exchange.session = None
 
 
 class BybitFuturesConnector:
@@ -551,10 +589,22 @@ class BybitFuturesConnector:
         return await self._exchange.fetch_ticker(symbol)
 
     async def close(self):
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         session = getattr(self._exchange, "session", None)
-        await self._exchange.close()
-        if session is not None and not session.closed:
-            await session.close()
+        try:
+            await self._exchange.close()
+        except Exception as e:
+            logger.debug("Bybit futures close failed: %s", e)
+        finally:
+            if session is not None and not session.closed:
+                try:
+                    await session.close()
+                except Exception as e:
+                    logger.debug("Bybit futures session close failed: %s", e)
+            if getattr(self._exchange, "session", None) is session:
+                self._exchange.session = None
 
 
 class FuturesPaperBroker:
