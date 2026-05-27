@@ -2338,13 +2338,17 @@ class AutoTradeBot:
                 self._record_no_trade(symbol, risk_detail)
                 return
 
-            risk_budget = total_value * self.settings.get("risk_per_trade_pct", 5.0) / 100
+            _pos_size_pct_spot = self.settings.get("position_size_pct", 25.0)
+            _sl_setting_pct = self.settings.get("stop_loss_pct", 2.5)
+            _implied_risk_pct = _pos_size_pct_spot * _sl_setting_pct / 100  # 포지션 크기 × SL = 실질 손실 비율
+            _effective_risk_pct = max(_implied_risk_pct, self.settings.get("risk_per_trade_pct", 5.0))
+            risk_budget = total_value * _effective_risk_pct / 100
             risk_cap = risk_budget / max(risk_detail.get("risk_pct", sl_pct) / 100, 0.001)
             if risk_cap < invest_krw:
                 logger.info(
                     f"AutoBot 현물 포지션 크기 조정 {symbol}: "
                     f"설정 {invest_krw:.2f} → 적용 {risk_cap:.2f} "
-                    f"(risk_cap, risk_per_trade={self.settings.get('risk_per_trade_pct',5.0)}%)"
+                    f"(implied_risk={_implied_risk_pct:.2f}%, effective_risk={_effective_risk_pct:.2f}%)"
                 )
                 invest_krw = risk_cap
 
@@ -3174,10 +3178,14 @@ class AutoTradeBot:
             return
 
         # position_size_pct: 잔고 대비 희망 증거금 비율 (사용자 설정)
-        # 단, SL×레버리지 기반 리스크 상한(잔고 2% 손실)을 초과하지 않도록 캡 적용
+        # implied_risk = position_size_pct × SL% × leverage / 100 → 설정 기반 실질 손실 비율
+        # implied_risk가 risk_per_trade_pct보다 크면 캡 적용 (안전망)
         _pos_size_pct = self.settings.get("position_size_pct", 25.0)
         _desired = usdt_balance * _pos_size_pct / 100
-        _risk_budget = usdt_balance * self.settings.get("risk_per_trade_pct", 0.8) / 100
+        _sl_setting_pct = self.settings.get("stop_loss_pct", 1.5)
+        _implied_risk_pct = _pos_size_pct * _sl_setting_pct / 100 * leverage  # e.g. 30%×1.5%×8=3.6%
+        _effective_risk_pct = max(_implied_risk_pct, self.settings.get("risk_per_trade_pct", 5.0))
+        _risk_budget = usdt_balance * _effective_risk_pct / 100
         _risk_cap = (
             _risk_budget / (risk_detail.get("risk_pct", sl_pct) / 100 * leverage)
             if sl_pct > 0 and leverage > 0
@@ -3188,7 +3196,7 @@ class AutoTradeBot:
             logger.info(
                 f"AutoBot 선물 포지션 크기 조정 {symbol}: "
                 f"설정 {_desired:.2f} → 적용 {usdt_amount:.2f} USDT "
-                f"(risk_cap={_risk_cap:.2f}, risk_per_trade={self.settings.get('risk_per_trade_pct',5.0)}%)"
+                f"(implied_risk={_implied_risk_pct:.2f}%, effective_risk={_effective_risk_pct:.2f}%)"
             )
         if usdt_amount < 5:
             risk_detail = {
