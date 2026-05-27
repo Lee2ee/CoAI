@@ -2120,7 +2120,8 @@ class AutoTradeBot:
 
         volume_ratio = self._float(candidate.get("volume_ratio"), 0.0)
         min_volume_ratio = self.settings.get("min_volume_ratio", 1.1)
-        if volume_ratio < min_volume_ratio and candidate.get("strategy_type") != "mean_reversion":
+        # volume_ratio == 0.0 means exchange returned no volume data — skip check
+        if 0 < volume_ratio < min_volume_ratio and candidate.get("strategy_type") != "mean_reversion":
             reasons.append(f"volume not confirmed ({volume_ratio:.2f}x)")
 
         mtf_trend = candidate.get("mtf_trend", "neutral")

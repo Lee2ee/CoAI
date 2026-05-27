@@ -1010,7 +1010,8 @@ def _score_futures(df: pd.DataFrame, symbol: str, style: str = "short") -> dict:
 
     vol_avg   = float(volume.iloc[-21:-1].mean()) if len(volume) >= 21 else 1.0
     vol_now   = float(volume.iloc[-1])
-    vol_ratio = vol_now / vol_avg if vol_avg > 0 else 1.0
+    # vol_now == 0 means missing/bad data from exchange — treat as neutral
+    vol_ratio = (vol_now / vol_avg) if (vol_avg > 0 and vol_now > 0) else 1.0
     price_now = float(close.iloc[-1])
     price_change_pct = float((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100) if len(close) >= 2 else 0.0
 
