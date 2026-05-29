@@ -110,7 +110,7 @@ DEBUG=false
 PAPER_TRADING_DEFAULT=true
 
 # 포트 설정 — 이 두 값만 바꾸면 start.sh와 Vite 프록시에 자동 반영됩니다
-BACKEND_PORT=8000
+BACKEND_PORT=8001
 FRONTEND_PORT=5173
 ```
 
@@ -198,7 +198,7 @@ bash start.sh
 ```cmd
 REM [터미널 1] 백엔드
 cd backend
-..\venv\Scripts\python -m uvicorn app.main:app --reload --port 8000
+..\venv\Scripts\python -m uvicorn app.main:app --reload --port 8001
 
 REM [터미널 2] 프론트엔드
 cd frontend
@@ -210,7 +210,7 @@ npm run dev
 ```bash
 # 백엔드
 cd backend
-../venv/Scripts/python -m uvicorn app.main:app --reload --port 8000
+../venv/Scripts/python -m uvicorn app.main:app --reload --port 8001
 
 # 프론트엔드
 cd frontend
@@ -222,8 +222,8 @@ npm run dev
 | 서비스 | URL |
 |---|---|
 | Frontend UI | http://localhost:5173 |
-| Backend API | http://localhost:8000 |
-| API Docs (Swagger) | http://localhost:8000/docs |
+| Backend API | http://localhost:8001 |
+| API Docs (Swagger) | http://localhost:8001/docs |
 
 ---
 
@@ -302,8 +302,8 @@ UI → 설정 → `ollama` 선택 → URL `http://localhost:11434` → 저장
 |------|------|--------|
 | `trading_style` | 매매 스타일 (scalping/short/mid/long) | short |
 | `stop_loss_pct` | 손절 비율 (%) | 2.5 |
-| `take_profit_pct` | 익절 비율 (%) | 6.0 |
-| `min_score` | 진입 최소 점수 (0~100) | 55 |
+| `take_profit_pct` | 익절 비율 (%) | 5.0 |
+| `min_score` | 진입 최소 점수 (0~100) | 48 |
 | `max_positions` | 최대 동시 포지션 수 | 4 |
 | `position_size_pct` | 잔고 대비 포지션 크기 (%) | 25.0 |
 | `auto_avg_down` | 자동 물타기 활성화 | true |
@@ -316,10 +316,12 @@ UI → 설정 → `ollama` 선택 → URL `http://localhost:11434` → 저장
 | `partial_exit_ratio` | 부분 청산 비율 | 0.4 (40%) |
 | `partial_exit_trigger_pct` | TP까지 거리의 N% 도달 시 발동 | 0.6 (60%) |
 | `max_daily_loss_pct` | 일일 최대 손실 한도 (%) | 5.0 |
-| `max_portfolio_exposure_pct` | 최대 포트폴리오 노출 (%) | 80.0 |
+| `max_portfolio_exposure_pct` | 최대 포트폴리오 노출 (%) | 90.0 |
 | `correlation_threshold` | 상관계수 진입 차단 임계값 | 0.85 |
 | `mdd_limit_pct` | MDD 자동 중단 임계값 (%) | 20.0 |
-| `risk_per_trade_pct` | 거래당 최대 손실 한도 (잔고 대비 %) — `position_size_pct × stop_loss_pct` 기반 실질 손실이 이 값을 초과하면 포지션 크기를 자동으로 줄여 리스크를 제한 | 5.0 |
+| `risk_per_trade_pct` | 거래당 최대 손실 한도 (잔고 대비 %) — `position_size_pct × stop_loss_pct` 기반 실질 손실이 이 값을 초과하면 포지션 크기를 자동으로 줄여 리스크를 제한 | 1.2 |
+
+선물 모드는 별도 안전 프리셋을 사용합니다. 기본값은 `leverage=3`, `max_positions=2`, `position_size_pct=12.0`, 레버리지 입력 상한은 `5x`입니다.
 
 > **주의**: AutoBot 설정은 서버 재시작 시 기본값으로 초기화됩니다. 설정 영속화는 추후 지원 예정입니다.
 
@@ -329,7 +331,7 @@ UI → 설정 → `ollama` 선택 → URL `http://localhost:11434` → 저장
 
 | 변수 | 설명 | 기본값 |
 |---|---|---|
-| `BACKEND_PORT` | 백엔드 서버 포트 | `8000` |
+| `BACKEND_PORT` | 백엔드 서버 포트 | `8001` |
 | `FRONTEND_PORT` | 프론트엔드 개발 서버 포트 | `5173` |
 | `SECRET_KEY` | JWT 서명 키 **(필수 변경)** | `change-me-...` |
 | `DATABASE_URL` | SQLAlchemy DB URL | `sqlite+aiosqlite:///./coai.db` |

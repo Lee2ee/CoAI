@@ -9,6 +9,7 @@
 """
 import asyncio
 import logging
+from contextlib import suppress
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -21,13 +22,14 @@ from ..exchange.connector import (
     BinanceFuturesConnector, BybitFuturesConnector,
     FuturesPaperBroker, FUTURES_FEE_RATES, FUTURES_MMR, FUTURES_FEE_RATE,
 )
-from .scanner import scan_market, scan_futures_market, FUTURES_SYMBOLS, STRATEGY_CONFIGS, STRATEGY_STYLE_CONFIGS, TIMEFRAME_MINUTES, HTF_MAP
+from .scanner import scan_market, scan_futures_market, STRATEGY_CONFIGS, STRATEGY_STYLE_CONFIGS, TIMEFRAME_MINUTES
 from . import ai_analyst
-from ..risk.manager import PortfolioRiskManager, calc_performance, calc_futures_position_size, calc_kelly_fraction
+from ..risk.manager import PortfolioRiskManager, calc_performance, calc_kelly_fraction
 
 logger = logging.getLogger(__name__)
 
 MAX_TRADE_LOG = 50
+MAX_FUTURES_LEVERAGE = 5
 
 # ── 매매 스타일 프리셋 ────────────────────────────────────────────────────────
 TRADING_STYLE_PRESETS: dict[str, dict] = {
@@ -122,6 +124,98 @@ TRADING_STYLE_PRESETS: dict[str, dict] = {
 }
 
 
+# 선물은 수수료/슬리피지/청산 리스크가 커서 현물 프리셋과 별도로 작게 운용한다.
+FUTURES_STYLE_PRESETS: dict[str, dict] = {
+    "scalping": {
+        "label": "초단타",
+        "timeframe": "15m",
+        "scan_interval_min": 3,
+        "stop_loss_pct": 1.1,
+        "take_profit_pct": 2.6,
+        "min_score": 55,
+        "position_size_pct": 8.0,
+        "max_positions": 1,
+        "auto_avg_down": False,
+        "avg_down_threshold_pct": 3.0,
+        "max_avg_down": 1,
+        "auto_add": False,
+        "add_threshold_pct": 3.0,
+        "max_add": 1,
+        "trailing_stop": True,
+        "trailing_activate_pct": 1.0,
+        "trailing_pct": 0.6,
+        "max_hold_hours": 3,
+    },
+    "short": {
+        "label": "단타",
+        "timeframe": "1h",
+        "scan_interval_min": 5,
+        "stop_loss_pct": 1.5,
+        "take_profit_pct": 4.5,
+        "min_score": 55,
+        "position_size_pct": 12.0,
+        "max_positions": 2,
+        "auto_avg_down": False,
+        "avg_down_threshold_pct": 3.0,
+        "max_avg_down": 1,
+        "auto_add": False,
+        "add_threshold_pct": 3.0,
+        "max_add": 1,
+        "trailing_stop": True,
+        "trailing_activate_pct": 1.5,
+        "trailing_pct": 0.8,
+        "max_hold_hours": 12,
+    },
+    "mid": {
+        "label": "중장기",
+        "timeframe": "4h",
+        "scan_interval_min": 15,
+        "stop_loss_pct": 3.0,
+        "take_profit_pct": 7.5,
+        "min_score": 60,
+        "position_size_pct": 10.0,
+        "max_positions": 2,
+        "auto_avg_down": False,
+        "avg_down_threshold_pct": 5.0,
+        "max_avg_down": 1,
+        "auto_add": False,
+        "add_threshold_pct": 5.0,
+        "max_add": 1,
+        "trailing_stop": True,
+        "trailing_activate_pct": 2.5,
+        "trailing_pct": 1.2,
+        "max_hold_hours": 48,
+    },
+    "long": {
+        "label": "장기",
+        "timeframe": "1d",
+        "scan_interval_min": 60,
+        "stop_loss_pct": 5.0,
+        "take_profit_pct": 12.0,
+        "min_score": 65,
+        "position_size_pct": 8.0,
+        "max_positions": 1,
+        "auto_avg_down": False,
+        "avg_down_threshold_pct": 8.0,
+        "max_avg_down": 1,
+        "auto_add": False,
+        "add_threshold_pct": 8.0,
+        "max_add": 1,
+        "trailing_stop": True,
+        "trailing_activate_pct": 4.0,
+        "trailing_pct": 2.0,
+        "max_hold_hours": 0,
+    },
+}
+
+FUTURES_MIN_SCORE_FLOOR: dict[str, int] = {
+    "scalping": 45,
+    "short": 50,
+    "mid": 55,
+    "long": 60,
+}
+
+
 # ── 투자 성향 프로파일 ────────────────────────────────────────────────────────
 # 스타일 프리셋 기본값에 곱/가산하는 조정치. "balanced"는 변경 없음.
 RISK_PROFILE_ADJUSTMENTS: dict[str, dict] = {
@@ -169,6 +263,27 @@ def apply_risk_profile(preset: dict, profile: str) -> dict:
         result["auto_avg_down"] = adj["auto_avg_down"]
     if "auto_add" in adj:
         result["auto_add"] = adj["auto_add"]
+    return result
+
+
+def apply_style_preset(style: str, profile: str, market_type: str = "spot") -> dict:
+    """현물/선물 모드에 맞는 스타일 프리셋을 적용."""
+    presets = FUTURES_STYLE_PRESETS if market_type == "futures" else TRADING_STYLE_PRESETS
+    preset = presets.get(style)
+    if not preset:
+        return {}
+
+    result = apply_risk_profile(preset, profile)
+    if market_type == "futures":
+        # 공격적 프로파일이 들어와도 선물 안전 상한은 넘기지 않는다.
+        result["position_size_pct"] = min(result.get("position_size_pct", 12.0), 15.0)
+        result["max_positions"] = min(result.get("max_positions", 2), 2)
+        result["min_score"] = max(
+            result.get("min_score", 55),
+            FUTURES_MIN_SCORE_FLOOR.get(style, 50),
+        )
+        result["auto_avg_down"] = False
+        result["auto_add"] = False
     return result
 
 
@@ -287,15 +402,15 @@ class AutoTradeBot:
             "correlation_threshold": 0.85,       # 종목 간 상관계수 진입 차단 임계값
             "mdd_limit_pct": 20.0,              # MDD 이 값(%) 초과 시 봇 자동 중지
             "risk_filter_enabled": True,
-            "risk_per_trade_pct": 5.0,  # 거래당 최대 손실 한도 (잔고 %). 너무 낮으면 position_size_pct 무시됨
+            "risk_per_trade_pct": 1.2,  # 거래당 최대 손실 한도 (잔고 %)
             "min_reward_risk_ratio": 2.0,
             "min_net_reward_risk_ratio": 1.5,
             "max_trade_cost_pct": 0.45,
             "base_slippage_pct": 0.05,
             "expected_spread_pct": 0.03,
             "min_volume_ratio": 0,  # 거래량 체크 비활성화 (volume은 스코어에서 이미 반영)
-            "max_effective_leverage": 20,  # SL 기반 안전 상한이 실질적 제약 — 이 값은 절대 상한만 담당
-            "min_liquidation_buffer_pct": 3.0,
+            "max_effective_leverage": 5,  # 선물 안전 상한. 기본 레버리지는 더 낮게 둔다.
+            "min_liquidation_buffer_pct": 5.0,
             "max_adverse_funding_rate": 0.001,   # 0.1%/8h — 이 이상이면 hard block (net_rr로도 이미 반영됨)
             "max_abs_funding_rate": 0.003,        # 0.3%/8h — 극단적 펀딩 시 양방향 차단
             # ── 부분 청산 (TODO 22) ────────────────────────────────────────────
@@ -308,7 +423,7 @@ class AutoTradeBot:
             "max_pyramid": 2,              # 최대 횟수
             # ── 선물 거래 설정 ────────────────────────────────────────────────
             "market_type": "spot",         # "spot" | "futures"
-            "leverage": 8,                 # 레버리지 배수 (1~20)
+            "leverage": 3,                 # 레버리지 배수 (1~20)
             "margin_mode": "cross",        # "cross" | "isolated"
             # ── 자동 스타일 전환 허용 목록 ────────────────────────────────────
             "allowed_styles": ["scalping", "short", "mid", "long"],
@@ -328,13 +443,13 @@ class AutoTradeBot:
         }
         self._futures_settings: dict = {
             "trading_style": "short", "risk_profile": "balanced",
-            "scan_interval_min": 5, "max_positions": 4,
-            "position_size_pct": 25.0, "stop_loss_pct": 1.5, "take_profit_pct": 4.5,
+            "scan_interval_min": 5, "max_positions": 2,
+            "position_size_pct": 12.0, "stop_loss_pct": 1.5, "take_profit_pct": 4.5,
             "min_score": 55, "timeframe": "1h",
             "auto_avg_down": False, "avg_down_threshold_pct": 3.0, "max_avg_down": 1,
             "auto_add": False, "add_threshold_pct": 3.0, "max_add": 1,
             "trailing_stop": True, "trailing_activate_pct": 1.5, "trailing_pct": 0.8,
-            "max_hold_hours": 12, "leverage": 8, "margin_mode": "cross",
+            "max_hold_hours": 12, "leverage": 3, "margin_mode": "cross",
         }
 
     # ── 프로퍼티 ─────────────────────────────────────────────────────────────
@@ -366,7 +481,7 @@ class AutoTradeBot:
         if self._running:
             return
         if settings:
-            self.settings.update({k: v for k, v in settings.items() if k in self.settings})
+            self.update_settings(settings)
 
         self._running = True
         self._started_at = datetime.now(KST)
@@ -469,6 +584,42 @@ class AutoTradeBot:
         self._futures_connector = None
         logger.info("AutoTradeBot stopped")
 
+    async def shutdown(self):
+        """서버 종료 시 백그라운드 태스크와 거래소 세션을 확실히 정리."""
+        was_running = self._running
+        self._running = False
+        self._paused = False
+        self._started_at = None
+        self._last_regime_at = 0.0
+        self._first_regime_after_start = True
+
+        if self._price_task and not self._price_task.done():
+            self._price_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._price_task
+        self._price_task = None
+
+        try:
+            if self._scheduler.running and self._scheduler.get_job("auto_bot_cycle"):
+                self._scheduler.remove_job("auto_bot_cycle")
+        except Exception:
+            pass
+        try:
+            if self._scheduler.running:
+                self._scheduler.shutdown(wait=False)
+        except Exception:
+            pass
+
+        for conn in (self._connector, self._futures_connector):
+            if conn is None:
+                continue
+            with suppress(Exception):
+                await conn.close()
+        self._connector = None
+        self._futures_connector = None
+        if was_running:
+            logger.info("AutoTradeBot stopped")
+
     def pause(self):
         """일시정지: 신규 진입·스캔 차단. 기존 포지션 SL/TP 모니터는 유지."""
         if not self._running or self._paused:
@@ -570,13 +721,65 @@ class AutoTradeBot:
     def update_mode_settings(self, mode: str, new_settings: dict):
         """현물 또는 선물 설정을 독립적으로 업데이트. 활성 모드면 self.settings에도 즉시 반영."""
         saved = self._futures_settings if mode == "futures" else self._spot_settings
+        if mode == "futures":
+            new_settings = self._sanitize_settings_patch(new_settings)
+        if "trading_style" in new_settings:
+            profile = new_settings.get("risk_profile") or saved.get("risk_profile", "balanced")
+            applied = apply_style_preset(new_settings["trading_style"], profile, mode)
+            if applied:
+                new_settings = {**applied, **new_settings}
+        if mode == "futures":
+            new_settings = self._sanitize_settings_patch(new_settings, market_type="futures")
         for k, v in new_settings.items():
             if k in saved:
                 saved[k] = v
         if self.settings.get("market_type", "spot") == mode:
             self.update_settings({k: v for k, v in new_settings.items() if k != "market_type"})
 
+    def _sanitize_settings_patch(self, patch: dict, market_type: Optional[str] = None) -> dict:
+        """설정 API 우회 입력도 봇 내부 안전 상한에 맞춘다."""
+        result = dict(patch)
+        target_market = market_type or result.get("market_type") or self.settings.get("market_type", "spot")
+        max_eff_raw = result.get("max_effective_leverage", self.settings.get("max_effective_leverage", MAX_FUTURES_LEVERAGE))
+        try:
+            max_eff = int(max_eff_raw)
+        except (TypeError, ValueError):
+            max_eff = MAX_FUTURES_LEVERAGE
+        max_eff = max(1, min(MAX_FUTURES_LEVERAGE, max_eff))
+
+        if "max_effective_leverage" in result:
+            result["max_effective_leverage"] = max_eff
+        if "leverage" in result:
+            try:
+                leverage = int(result["leverage"])
+            except (TypeError, ValueError):
+                leverage = self.settings.get("leverage", 3)
+            result["leverage"] = max(1, min(leverage, max_eff))
+        if target_market == "futures":
+            if "position_size_pct" in result:
+                try:
+                    result["position_size_pct"] = min(max(float(result["position_size_pct"]), 1.0), 15.0)
+                except (TypeError, ValueError):
+                    result["position_size_pct"] = 12.0
+            if "max_positions" in result:
+                try:
+                    result["max_positions"] = min(max(int(result["max_positions"]), 1), 2)
+                except (TypeError, ValueError):
+                    result["max_positions"] = 2
+            if "trading_style" in result and "min_score" in result:
+                floor = FUTURES_MIN_SCORE_FLOOR.get(result["trading_style"], 50)
+                try:
+                    result["min_score"] = max(int(result["min_score"]), floor)
+                except (TypeError, ValueError):
+                    result["min_score"] = floor
+            if "auto_avg_down" in result:
+                result["auto_avg_down"] = False
+            if "auto_add" in result:
+                result["auto_add"] = False
+        return result
+
     def update_settings(self, new_settings: dict):
+        new_settings = self._sanitize_settings_patch(new_settings)
         # market_type 전환: 현재 모드 설정 저장 → 새 모드 설정 복원
         if "market_type" in new_settings:
             new_type = new_settings["market_type"]
@@ -585,6 +788,8 @@ class AutoTradeBot:
                 cur_saved = self._futures_settings if old_type == "futures" else self._spot_settings
                 cur_saved.update({k: self.settings[k] for k in _MODE_SPECIFIC_KEYS if k in self.settings})
                 new_saved = self._futures_settings if new_type == "futures" else self._spot_settings
+                if new_type == "futures":
+                    new_saved.update(self._sanitize_settings_patch(new_saved, market_type="futures"))
                 for k, v in new_saved.items():
                     if k in self.settings:
                         self.settings[k] = v
@@ -594,10 +799,10 @@ class AutoTradeBot:
         # 스타일 변경 시 프리셋 + 투자 성향(risk_profile)을 함께 적용
         if "trading_style" in new_settings:
             style = new_settings["trading_style"]
-            preset = TRADING_STYLE_PRESETS.get(style)
-            if preset:
-                profile = new_settings.get("risk_profile") or self.settings.get("risk_profile", "balanced")
-                applied = apply_risk_profile(preset, profile)
+            profile = new_settings.get("risk_profile") or self.settings.get("risk_profile", "balanced")
+            market_type = new_settings.get("market_type") or self.settings.get("market_type", "spot")
+            applied = apply_style_preset(style, profile, market_type)
+            if applied:
                 for k, v in applied.items():
                     if k != "label" and k in self.settings:
                         self.settings[k] = v
@@ -762,20 +967,21 @@ class AutoTradeBot:
                         await self._close_futures_position(symbol, price, "trailing_stop")
                         return
 
-        # ── 손익분기 SL 이동: 가격이 TP의 40% 이상 진행 → SL을 진입가로 ─────────
+        # ── 손익분기 SL 이동: 가격이 TP의 40% 이상 진행 → 비용 포함 본전가로 ─────────
         if (price_gain_pct >= tp_pct * 0.4
                 and not pos.get("trailing_active")
                 and not pos.get("breakeven_set")):
-            if side == "long" and pos["stop_loss_price"] < entry:
-                pos["stop_loss_price"] = entry
+            be_price = self._futures_breakeven_price(entry, side, pos)
+            if side == "long" and pos["stop_loss_price"] < be_price:
+                pos["stop_loss_price"] = be_price
                 pos["lowest_price"] = price  # SL 상향 후 저점 기준 초기화
                 pos["breakeven_set"] = True
-                logger.info(f"AutoBot 선물 손익분기 SL 이동 {symbol} ({side}): SL → {entry:.4f}")
-            elif side == "short" and pos["stop_loss_price"] > entry:
-                pos["stop_loss_price"] = entry
+                logger.info(f"AutoBot 선물 손익분기 SL 이동 {symbol} ({side}): SL → {be_price:.4f}")
+            elif side == "short" and pos["stop_loss_price"] > be_price:
+                pos["stop_loss_price"] = be_price
                 pos["highest_price"] = price  # SL 하향 후 고점 기준 초기화
                 pos["breakeven_set"] = True
-                logger.info(f"AutoBot 선물 손익분기 SL 이동 {symbol} ({side}): SL → {entry:.4f}")
+                logger.info(f"AutoBot 선물 손익분기 SL 이동 {symbol} ({side}): SL → {be_price:.4f}")
 
         # ── 수익 래칫: TP 진행률 60%/80% 단계로 SL 자동 상향 (trailing 미활성 구간 보호)
         if tp_pct > 0 and not pos.get("trailing_active"):
@@ -2097,6 +2303,31 @@ class AutoTradeBot:
         except (TypeError, ValueError):
             return default
 
+    def _futures_breakeven_price(self, entry: float, side: str, pos: Optional[dict] = None) -> float:
+        """수수료/슬리피지/기지급 펀딩비를 반영한 선물 손익분기 마크가격."""
+        if entry <= 0:
+            return entry
+        fee_rate = self._float(getattr(self._futures_broker, "fee_rate", FUTURES_FEE_RATE), FUTURES_FEE_RATE)
+        slippage_rate = self._float(
+            getattr(self._futures_broker, "SLIPPAGE_RATE", 0.0005),
+            0.0005,
+        )
+        # 가격 기준 완충폭. 왕복 비용에 약간의 버퍼를 더해 "본전 청산인데 수수료로 손실"을 막는다.
+        offset = fee_rate * 2 + slippage_rate * 2 + 0.0005
+
+        if pos:
+            contracts = self._float(pos.get("contracts"), 0.0)
+            funding_paid = self._float(pos.get("funding_paid"), 0.0)
+            if funding_paid <= 0:
+                fp = self._futures_broker.positions.get(pos.get("symbol", ""))
+                funding_paid = self._float((fp or {}).get("funding_paid"), 0.0)
+            if contracts > 0 and funding_paid > 0:
+                offset += funding_paid / max(contracts * entry, 1e-9)
+
+        if side == "short":
+            return max(0.0, entry * (1 - offset))
+        return entry * (1 + offset)
+
     def _estimate_trade_cost_pct(
         self,
         candidate: dict,
@@ -2339,16 +2570,16 @@ class AutoTradeBot:
                 return
 
             _pos_size_pct_spot = self.settings.get("position_size_pct", 25.0)
-            _sl_setting_pct = self.settings.get("stop_loss_pct", 2.5)
-            _implied_risk_pct = _pos_size_pct_spot * _sl_setting_pct / 100  # 포지션 크기 × SL = 실질 손실 비율
-            _effective_risk_pct = max(_implied_risk_pct, self.settings.get("risk_per_trade_pct", 5.0))
-            risk_budget = total_value * _effective_risk_pct / 100
-            risk_cap = risk_budget / max(risk_detail.get("risk_pct", sl_pct) / 100, 0.001)
+            _risk_pct_spot = max(self._float(risk_detail.get("risk_pct"), sl_pct), sl_pct)
+            _implied_risk_pct = _pos_size_pct_spot * _risk_pct_spot / 100
+            _risk_limit_pct = max(0.1, self._float(self.settings.get("risk_per_trade_pct"), 1.2))
+            risk_budget = total_value * _risk_limit_pct / 100
+            risk_cap = risk_budget / max(_risk_pct_spot / 100, 0.001)
             if risk_cap < invest_krw:
                 logger.info(
                     f"AutoBot 현물 포지션 크기 조정 {symbol}: "
                     f"설정 {invest_krw:.2f} → 적용 {risk_cap:.2f} "
-                    f"(implied_risk={_implied_risk_pct:.2f}%, effective_risk={_effective_risk_pct:.2f}%)"
+                    f"(implied_risk={_implied_risk_pct:.2f}%, risk_limit={_risk_limit_pct:.2f}%)"
                 )
                 invest_krw = risk_cap
 
@@ -3009,14 +3240,15 @@ class AutoTradeBot:
 
     async def _enter_futures_from_scan(self, scan_results: list[dict]):
         """선물 스캔 결과에서 신규 포지션 진입."""
-        # 선물은 현물 프리셋 min_score를 그대로 쓰면 scalping(62점)에서 진입이 거의 막힌다.
-        # 스타일별 선물 기준으로 상한을 두고, 리스크/AI 필터에서 최종 진입 품질을 다시 검증한다.
-        futures_min_by_style = {"scalping": 35, "short": 45, "mid": 50, "long": 55}
+        # 선물은 수수료/슬리피지/펀딩비가 누적되므로 약한 후보를 과감히 버린다.
+        # scalping은 현물 프리셋(62점)이 과도하게 막을 수 있어 별도 상한만 둔다.
+        futures_min_by_style = {"scalping": 45, "short": 50, "mid": 55, "long": 60}
+        futures_max_by_style = {"scalping": 50, "short": 60, "mid": 65, "long": 70}
         style = self.settings.get("trading_style", "short")
-        min_score = max(30, min(
-            int(self.settings.get("min_score", 48)),
-            futures_min_by_style.get(style, 48),
-        ))
+        min_score = max(
+            futures_min_by_style.get(style, 50),
+            min(int(self.settings.get("min_score", 55)), futures_max_by_style.get(style, 60)),
+        )
         candidates = [
             r for r in scan_results
             if r["score"] >= min_score
@@ -3201,16 +3433,16 @@ class AutoTradeBot:
             return
 
         # position_size_pct: 잔고 대비 희망 증거금 비율 (사용자 설정)
-        # implied_risk = position_size_pct × SL% × leverage / 100 → 설정 기반 실질 손실 비율
-        # implied_risk가 risk_per_trade_pct보다 크면 캡 적용 (안전망)
+        # implied_risk = position_size_pct × 실질위험% × leverage / 100
+        # risk_per_trade_pct를 "거래당 계좌 손실 상한"으로 사용해 증거금을 줄인다.
         _pos_size_pct = self.settings.get("position_size_pct", 25.0)
         _desired = usdt_balance * _pos_size_pct / 100
-        _sl_setting_pct = self.settings.get("stop_loss_pct", 1.5)
-        _implied_risk_pct = _pos_size_pct * _sl_setting_pct / 100 * leverage  # e.g. 30%×1.5%×8=3.6%
-        _effective_risk_pct = max(_implied_risk_pct, self.settings.get("risk_per_trade_pct", 5.0))
-        _risk_budget = usdt_balance * _effective_risk_pct / 100
+        _risk_pct = max(self._float(risk_detail.get("risk_pct"), sl_pct), sl_pct)
+        _implied_risk_pct = _pos_size_pct * _risk_pct / 100 * leverage
+        _risk_limit_pct = max(0.1, self._float(self.settings.get("risk_per_trade_pct"), 1.2))
+        _risk_budget = usdt_balance * _risk_limit_pct / 100
         _risk_cap = (
-            _risk_budget / (risk_detail.get("risk_pct", sl_pct) / 100 * leverage)
+            _risk_budget / (_risk_pct / 100 * leverage)
             if sl_pct > 0 and leverage > 0
             else _desired
         )
@@ -3219,7 +3451,7 @@ class AutoTradeBot:
             logger.info(
                 f"AutoBot 선물 포지션 크기 조정 {symbol}: "
                 f"설정 {_desired:.2f} → 적용 {usdt_amount:.2f} USDT "
-                f"(implied_risk={_implied_risk_pct:.2f}%, effective_risk={_effective_risk_pct:.2f}%)"
+                f"(implied_risk={_implied_risk_pct:.2f}%, risk_limit={_risk_limit_pct:.2f}%)"
             )
         if usdt_amount < 5:
             risk_detail = {
@@ -3478,20 +3710,21 @@ class AutoTradeBot:
                             pos["stop_loss_price"] = trail_sl
                             pos["highest_price"] = price  # SL 하향 후 고점 기준 초기화
 
-            # ── 손익분기 SL 이동: 가격이 TP의 40% 이상 진행 → SL → 진입가 ──
+            # ── 손익분기 SL 이동: 가격이 TP의 40% 이상 진행 → 비용 포함 본전가 ──
             if (price_gain_pct >= tp_pct * 0.4
                     and not pos.get("trailing_active")
                     and not pos.get("breakeven_set")):
-                if side == "long" and pos["stop_loss_price"] < entry:
-                    pos["stop_loss_price"] = entry
+                be_price = self._futures_breakeven_price(entry, side, pos)
+                if side == "long" and pos["stop_loss_price"] < be_price:
+                    pos["stop_loss_price"] = be_price
                     pos["lowest_price"] = price  # SL 상향 후 저점 기준 초기화
                     pos["breakeven_set"] = True
-                    logger.info(f"AutoBot 선물 손익분기 SL {symbol} ({side}): SL → {entry:.4f}")
-                elif side == "short" and pos["stop_loss_price"] > entry:
-                    pos["stop_loss_price"] = entry
+                    logger.info(f"AutoBot 선물 손익분기 SL {symbol} ({side}): SL → {be_price:.4f}")
+                elif side == "short" and pos["stop_loss_price"] > be_price:
+                    pos["stop_loss_price"] = be_price
                     pos["highest_price"] = price  # SL 하향 후 고점 기준 초기화
                     pos["breakeven_set"] = True
-                    logger.info(f"AutoBot 선물 손익분기 SL {symbol} ({side}): SL → {entry:.4f}")
+                    logger.info(f"AutoBot 선물 손익분기 SL {symbol} ({side}): SL → {be_price:.4f}")
 
             # ── 수익 래칫: TP 진행률 60%/80% 단계로 SL 자동 상향 (trailing 미활성 구간 보호)
             if tp_pct > 0 and not pos.get("trailing_active"):

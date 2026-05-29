@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .core.config import get_settings
 from .core.database import init_db, AsyncSessionLocal
 from .api import auth, strategies, backtest, market, trades, ws, exchange_accounts, auto_strategy, auto_bot, ai_config
+from .services.auto_trade.bot import get_auto_bot
 from .services.strategy.scheduler import get_scheduler
 
 settings = get_settings()
@@ -133,8 +134,11 @@ async def lifespan(app: FastAPI):
     await init_db()
     await _load_ai_config_from_db()
     get_scheduler().start()
-    yield
-    get_scheduler().stop()
+    try:
+        yield
+    finally:
+        await get_auto_bot().shutdown()
+        await get_scheduler().stop()
 
 
 app = FastAPI(

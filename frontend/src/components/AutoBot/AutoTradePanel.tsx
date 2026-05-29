@@ -102,6 +102,58 @@ const STYLE_ORDER = ['scalping', 'short', 'mid', 'long'] as const
 const STYLE_LABEL: Record<string, string> = {
   scalping: '초단타', short: '단타', mid: '중장기', long: '장기',
 }
+const FUTURES_LEVERAGE_MIN = 1
+const FUTURES_LEVERAGE_MAX = 5
+const clampFuturesLeverage = (value: unknown) => {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return 3
+  return Math.min(FUTURES_LEVERAGE_MAX, Math.max(FUTURES_LEVERAGE_MIN, Math.round(n)))
+}
+const FUTURES_STYLE_PRESETS: Record<string, StylePreset> = {
+  scalping: {
+    key: 'scalping', label: '초단타', timeframe: '15m', scan_interval_min: 3,
+    stop_loss_pct: 1.1, take_profit_pct: 2.6, min_score: 55,
+    position_size_pct: 8, max_positions: 1,
+    auto_avg_down: false, avg_down_threshold_pct: 3, max_avg_down: 1,
+    auto_add: false, add_threshold_pct: 3, max_add: 1,
+  },
+  short: {
+    key: 'short', label: '단타', timeframe: '1h', scan_interval_min: 5,
+    stop_loss_pct: 1.5, take_profit_pct: 4.5, min_score: 55,
+    position_size_pct: 12, max_positions: 2,
+    auto_avg_down: false, avg_down_threshold_pct: 3, max_avg_down: 1,
+    auto_add: false, add_threshold_pct: 3, max_add: 1,
+  },
+  mid: {
+    key: 'mid', label: '중장기', timeframe: '4h', scan_interval_min: 15,
+    stop_loss_pct: 3, take_profit_pct: 7.5, min_score: 60,
+    position_size_pct: 10, max_positions: 2,
+    auto_avg_down: false, avg_down_threshold_pct: 5, max_avg_down: 1,
+    auto_add: false, add_threshold_pct: 5, max_add: 1,
+  },
+  long: {
+    key: 'long', label: '장기', timeframe: '1d', scan_interval_min: 60,
+    stop_loss_pct: 5, take_profit_pct: 12, min_score: 65,
+    position_size_pct: 8, max_positions: 1,
+    auto_avg_down: false, avg_down_threshold_pct: 8, max_avg_down: 1,
+    auto_add: false, add_threshold_pct: 8, max_add: 1,
+  },
+}
+const FUTURES_MIN_SCORE_FLOOR: Record<string, number> = {
+  scalping: 45, short: 50, mid: 55, long: 60,
+}
+const clampFuturesSettings = (settings: Partial<AutoBotSettings>): Partial<AutoBotSettings> => {
+  const style = settings.trading_style ?? 'short'
+  return {
+    ...settings,
+    leverage: clampFuturesLeverage(settings.leverage ?? 3),
+    position_size_pct: Math.min(Math.max(Number(settings.position_size_pct ?? 12), 1), 15),
+    max_positions: Math.min(Math.max(Math.round(Number(settings.max_positions ?? 2)), 1), 2),
+    min_score: Math.max(Math.round(Number(settings.min_score ?? 55)), FUTURES_MIN_SCORE_FLOOR[style] ?? 50),
+    auto_avg_down: false,
+    auto_add: false,
+  }
+}
 
 // ─── 투자 성향 메타 ───────────────────────────────────────────────────────────
 
@@ -174,7 +226,14 @@ function SettingsModal({
   }, [spotSettingsData])
 
   useEffect(() => {
-    if (futuresSettingsData) setFuturesForm(f => ({ ...f, ...futuresSettingsData, market_type: 'futures' }))
+    if (futuresSettingsData) {
+      setFuturesForm(f => ({
+        ...f,
+        ...futuresSettingsData,
+        ...clampFuturesSettings({ ...f, ...futuresSettingsData }),
+        market_type: 'futures',
+      }))
+    }
   }, [futuresSettingsData])
 
   // 활성 탭에 따라 form/setForm을 분기
@@ -229,7 +288,7 @@ function SettingsModal({
   }
 
   const applyStyle = (styleKey: string) => {
-    const preset = presets?.[styleKey]
+    const preset = settingsTab === 'futures' ? FUTURES_STYLE_PRESETS[styleKey] : presets?.[styleKey]
     if (!preset) return
     const base: Partial<AutoBotSettings> = {
       trading_style: styleKey,
@@ -247,7 +306,8 @@ function SettingsModal({
       add_threshold_pct: preset.add_threshold_pct,
       max_add: preset.max_add,
     }
-    const adjusted = applyRiskAdj(base, form.risk_profile ?? 'balanced')
+    let adjusted = applyRiskAdj(base, form.risk_profile ?? 'balanced')
+    if (settingsTab === 'futures') adjusted = clampFuturesSettings({ ...adjusted, leverage: form.leverage ?? 3 })
     // 사용자가 켜놓은 물타기/추매/피라미딩은 스타일 전환 시에도 유지
     if (form.auto_avg_down) adjusted.auto_avg_down = true
     if (form.auto_add) adjusted.auto_add = true
@@ -256,7 +316,9 @@ function SettingsModal({
   }
 
   const applyRiskProfile = (profile: string) => {
-    const preset = presets?.[form.trading_style ?? 'short']
+    const preset = settingsTab === 'futures'
+      ? FUTURES_STYLE_PRESETS[form.trading_style ?? 'short']
+      : presets?.[form.trading_style ?? 'short']
     if (!preset) { setForm(f => ({ ...f, risk_profile: profile })); return }
     const base: Partial<AutoBotSettings> = {
       stop_loss_pct: preset.stop_loss_pct,
@@ -267,7 +329,14 @@ function SettingsModal({
       auto_avg_down: preset.auto_avg_down,
       auto_add: preset.auto_add,
     }
-    const adjusted = applyRiskAdj(base, profile)
+    let adjusted = applyRiskAdj(base, profile)
+    if (settingsTab === 'futures') {
+      adjusted = clampFuturesSettings({
+        ...adjusted,
+        trading_style: form.trading_style ?? 'short',
+        leverage: form.leverage ?? 3,
+      })
+    }
     // 사용자가 켜놓은 물타기/추매/피라미딩은 투자 성향 변경 시에도 유지
     if (form.auto_avg_down) adjusted.auto_avg_down = true
     if (form.auto_add) adjusted.auto_add = true
@@ -352,8 +421,9 @@ function SettingsModal({
                 const capSl   = Math.floor(1.0 / (slPct + 0.005 + 0.005))
                 const capWarn = Math.floor(1.0 / (0.020  + 0.005 + 0.005))
                 const maxSafeLev = Math.max(1, Math.min(capSl, capWarn))
-                const currentLev = form.leverage ?? 8
-                const willAdjust = currentLev > maxSafeLev
+                const maxAllowedLev = Math.min(maxSafeLev, FUTURES_LEVERAGE_MAX)
+                const currentLev = clampFuturesLeverage(form.leverage ?? 3)
+                const willAdjust = currentLev > maxAllowedLev
                 return (
                   <div>
                     <div className="flex items-center justify-between mb-1">
@@ -362,26 +432,26 @@ function SettingsModal({
                         <Tooltip text="내 자산의 N배 규모로 포지션을 열 수 있는 배율입니다. 수익과 손실이 모두 N배로 증폭되며 높을수록 청산 위험이 커집니다." iconOnly />
                       </p>
                       <div className="flex items-center gap-2">
-                        {willAdjust && <span className="text-xs text-down">→ {maxSafeLev}x 자동조정</span>}
+                        {willAdjust && <span className="text-xs text-down">→ {maxAllowedLev}x 자동조정</span>}
                         <span className="text-xs font-bold text-amber-400">{currentLev}x</span>
                       </div>
                     </div>
                     <input
-                      type="range" min={1} max={50} step={1}
+                      type="range" min={FUTURES_LEVERAGE_MIN} max={FUTURES_LEVERAGE_MAX} step={1}
                       value={currentLev}
-                      onChange={e => set('leverage', Number(e.target.value))}
+                      onChange={e => set('leverage', clampFuturesLeverage(e.target.value))}
                       className="w-full accent-amber-500"
                     />
                     <div className="relative text-xs text-slate-600 mt-0.5" style={{ height: '16px' }}>
-                      {([1, 10, 20, 50] as const).map((v, i) => (
+                      {([1, 2, 3, 5] as const).map((v, i) => (
                         <span key={v} className="absolute" style={{
-                          left: `${(v - 1) / (50 - 1) * 100}%`,
+                          left: `${(v - FUTURES_LEVERAGE_MIN) / (FUTURES_LEVERAGE_MAX - FUTURES_LEVERAGE_MIN) * 100}%`,
                           transform: i === 0 ? 'none' : i === 3 ? 'translateX(-100%)' : 'translateX(-50%)',
                         }}>{v}x</span>
                       ))}
                     </div>
                     <p className="text-xs text-slate-500 mt-1">
-                      손절 {form.stop_loss_pct ?? 1.5}% 기준 안전 상한: <span className={willAdjust ? 'text-down' : 'text-up'}>{maxSafeLev}x</span>
+                      손절 {form.stop_loss_pct ?? 1.5}% 기준 적용 상한: <span className={willAdjust ? 'text-down' : 'text-up'}>{maxAllowedLev}x</span>
                       {willAdjust && <span className="text-slate-500"> (초과 시 봇이 자동 하향)</span>}
                     </p>
                   </div>
@@ -416,7 +486,7 @@ function SettingsModal({
                 </div>
               </div>
               <p className="text-xs text-amber-400/80 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1.5">
-                레버리지가 높을수록 청산 위험이 증가합니다. 모의거래로 먼저 테스트하세요.
+                안전형 자동매매는 최대 {FUTURES_LEVERAGE_MAX}배까지만 허용합니다. 모의거래로 먼저 테스트하세요.
               </p>
             </div>
           )}
@@ -517,10 +587,10 @@ function SettingsModal({
           <div className="border-t border-surface-700 pt-4">
             <p className="text-xs text-slate-400 font-medium mb-2">기본 설정</p>
             <div className="grid grid-cols-2 gap-3">
-              <NumRow label="최대 포지션" min={1} max={10}
+              <NumRow label="최대 포지션" min={1} max={settingsTab === 'futures' ? 2 : 10}
                 value={form.max_positions} onChange={v => set('max_positions', v)}
                 tooltip="동시에 보유할 수 있는 종목 수의 상한입니다. 예: 5이면 최대 5개 종목에 포지션을 유지합니다." />
-              <NumRow label="투입 (%)" min={1} max={100} step={1}
+              <NumRow label="투입 (%)" min={1} max={settingsTab === 'futures' ? 15 : 100} step={1}
                 value={form.position_size_pct} onChange={v => set('position_size_pct', v)}
                 tooltip="종목 1개 매수 시 전체 자산 대비 투입할 비율입니다. 예: 10%이면 100만원 자산 중 10만원을 한 종목에 사용합니다." />
               <NumRow label="손절 (%)" min={0.5} max={20} step={0.5}
@@ -1485,17 +1555,20 @@ export default function AutoTradePanel() {
         <SettingsModal
           settings={status.settings}
           onSave={(s, mode) => {
+            const payload = mode === 'futures'
+              ? clampFuturesSettings({ ...s, leverage: s.leverage ?? status.settings.leverage })
+              : s
             // 공유 설정 (거래소, 모드, 모의/실거래) → 기존 settingsMut
             // market_type은 탭 기반으로 자동 결정
             const shared: Record<string, unknown> = {
               market_type: mode,  // 현물 탭 저장 → spot, 선물 탭 저장 → futures
             }
-            if (s.exchange_id !== undefined) shared.exchange_id = s.exchange_id
-            if (s.is_paper !== undefined) shared.is_paper = s.is_paper
+            if (payload.exchange_id !== undefined) shared.exchange_id = payload.exchange_id
+            if (payload.is_paper !== undefined) shared.is_paper = payload.is_paper
             settingsMut.mutate(shared)
             // 모드별 설정 → 해당 엔드포인트
-            if (mode === 'spot') spotSettingsMut.mutate(s)
-            else futuresSettingsMut.mutate(s)
+            if (mode === 'spot') spotSettingsMut.mutate(payload)
+            else futuresSettingsMut.mutate(payload)
           }}
           onClose={() => setShowSettings(false)}
         />
@@ -1879,7 +1952,7 @@ export default function AutoTradePanel() {
           </>)}
           {isFutures && (
             <span className="text-amber-400 font-medium">
-              선물 {status.settings.leverage ?? 5}x · {status.settings.margin_mode === 'isolated' ? 'Isolated' : 'Cross'}
+              선물 {clampFuturesLeverage(status.settings.leverage ?? 3)}x · {status.settings.margin_mode === 'isolated' ? 'Isolated' : 'Cross'}
             </span>
           )}
           {status.paused && (

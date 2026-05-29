@@ -421,7 +421,6 @@ async def get_symbols(user: User = Depends(get_current_user)):
     connector = ExchangeConnector(exchange_id="upbit", is_paper=True)
     try:
         markets = await asyncio.wait_for(connector._exchange.load_markets(), timeout=15)
-        await connector.close()
         symbols = sorted(
             [
                 s
@@ -431,8 +430,9 @@ async def get_symbols(user: User = Depends(get_current_user)):
         )
         return {"symbols": symbols}
     except Exception:
-        await connector.close()
         return {"symbols": _FALLBACK_SYMBOLS}
+    finally:
+        await connector.close()
 
 
 @router.post("/generate")
@@ -453,13 +453,12 @@ async def generate_strategy(
             connector.fetch_ohlcv(symbol, req.timeframe, limit=200),
             timeout=20,
         )
-        await connector.close()
     except asyncio.TimeoutError:
-        await connector.close()
         raise HTTPException(status_code=504, detail="시장 데이터 조회 타임아웃")
     except Exception as e:
-        await connector.close()
         raise HTTPException(status_code=502, detail=f"시장 데이터 조회 실패: {e}")
+    finally:
+        await connector.close()
 
     if df is None or len(df) < 50:
         raise HTTPException(

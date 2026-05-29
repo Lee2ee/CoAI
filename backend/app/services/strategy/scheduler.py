@@ -3,6 +3,7 @@
 """
 import asyncio
 import logging
+from contextlib import suppress
 from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -110,8 +111,12 @@ class StrategyScheduler:
     def get_all_states(self) -> list[dict[str, Any]]:
         return [e.get_state() for e in self._engines.values()]
 
-    def stop(self):
-        self._scheduler.shutdown()
+    async def stop(self):
+        for strategy_id in list(self._engines.keys()):
+            with suppress(Exception):
+                await self.deactivate_strategy(strategy_id)
+        if self._scheduler.running:
+            self._scheduler.shutdown(wait=False)
 
 
 _scheduler_instance: StrategyScheduler | None = None

@@ -160,10 +160,10 @@ async def get_portfolio(
         connector = _make_connector(account)
         try:
             raw = await connector.fetch_balance()
-            await connector.close()
         except Exception:
-            await connector.close()
             continue
+        finally:
+            await connector.close()
 
         krw = float((raw.get("KRW") or {}).get("free") or 0)
         coins_krw = 0.0
@@ -176,13 +176,16 @@ async def get_portfolio(
             amount = float(info.get("free") or 0)
             if amount <= 0:
                 continue
+            pub = None
             try:
                 pub = EC(exchange_id=account.exchange, is_paper=True)
                 ticker = await pub.fetch_ticker(f"{currency}/KRW")
-                await pub.close()
                 coins_krw += amount * float(ticker["last"])
             except Exception:
                 pass
+            finally:
+                if pub is not None:
+                    await pub.close()
 
         account_total = krw + coins_krw
         total_krw += account_total
@@ -208,15 +211,15 @@ async def test_connection(
     btc_symbol = _BTC_SYMBOL.get(account.exchange, "BTC/USDT")
     try:
         ticker = await connector.fetch_ticker(btc_symbol)
-        await connector.close()
         return {
             "ok": True,
             "btc_price": ticker["last"],
             "quote": "KRW" if account.exchange == "upbit" else "USDT",
         }
     except Exception as e:
-        await connector.close()
         return {"ok": False, "error": str(e)}
+    finally:
+        await connector.close()
 
 
 @router.get("/{account_id}/balance")
@@ -233,10 +236,10 @@ async def get_balance(
     connector = _make_connector(account)
     try:
         raw = await connector.fetch_balance()
-        await connector.close()
     except Exception as e:
-        await connector.close()
         raise HTTPException(status_code=502, detail=f"잔고 조회 실패: {e}")
+    finally:
+        await connector.close()
 
     # 보유량이 있는 자산만 반환
     balances = []
@@ -276,12 +279,12 @@ async def get_deposit_address(
     connector = _make_connector(account)
     try:
         result = await connector._exchange.fetch_deposit_address(currency)
-        await connector.close()
         return {
             "currency": currency,
             "address": result.get("address"),
             "tag": result.get("tag"),
         }
     except Exception as e:
-        await connector.close()
         raise HTTPException(status_code=502, detail=f"입금 주소 조회 실패: {e}")
+    finally:
+        await connector.close()

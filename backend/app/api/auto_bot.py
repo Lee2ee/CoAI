@@ -3,7 +3,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, BackgroundTasks, Body, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func as sqlfunc
-from ..services.auto_trade.bot import get_auto_bot, TRADING_STYLE_PRESETS, RISK_PROFILE_ADJUSTMENTS
+from ..services.auto_trade.bot import get_auto_bot, TRADING_STYLE_PRESETS, RISK_PROFILE_ADJUSTMENTS, MAX_FUTURES_LEVERAGE
 from ..services.risk.manager import calc_var
 from ..models.user import User
 from ..models.auto_bot_trade import AutoBotTrade
@@ -257,21 +257,26 @@ async def update_futures_settings(
     bot = get_auto_bot()
     leverage    = body.get("leverage")
     margin_mode = body.get("margin_mode")
+    patch = {}
 
     from fastapi import HTTPException
     if leverage is not None:
-        if not isinstance(leverage, int) or not (1 <= leverage <= 20):
-            raise HTTPException(status_code=400, detail="leverage는 1~20 사이 정수여야 합니다.")
-        bot.settings["leverage"] = leverage
+        if not isinstance(leverage, int) or not (1 <= leverage <= MAX_FUTURES_LEVERAGE):
+            raise HTTPException(status_code=400, detail=f"leverage는 1~{MAX_FUTURES_LEVERAGE} 사이 정수여야 합니다.")
+        patch["leverage"] = leverage
     if margin_mode is not None:
         if margin_mode not in ("cross", "isolated"):
             raise HTTPException(status_code=400, detail="margin_mode는 'cross' 또는 'isolated'여야 합니다.")
-        bot.settings["margin_mode"] = margin_mode
+        patch["margin_mode"] = margin_mode
+
+    if patch:
+        bot.update_mode_settings("futures", patch)
 
     return {
         "ok": True,
-        "leverage":    bot.settings["leverage"],
-        "margin_mode": bot.settings["margin_mode"],
+        "leverage":    bot._futures_settings["leverage"],
+        "margin_mode": bot._futures_settings["margin_mode"],
+        "settings":    bot._futures_settings,
     }
 
 

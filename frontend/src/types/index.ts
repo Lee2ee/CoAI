@@ -84,10 +84,15 @@ export interface Trade {
 export interface BacktestRequest {
   strategy_config: StrategyConfig
   exchange?: string
+  start_date?: string
+  end_date?: string
   initial_capital?: number
   fee_rate?: number
   walk_forward?: boolean
   n_splits?: number
+  monte_carlo?: boolean
+  monte_carlo_runs?: number
+  quant_sizing?: boolean
 }
 
 export interface BacktestResult {
@@ -103,7 +108,16 @@ export interface BacktestResult {
   timestamps: string[]
   trades: BacktestTrade[]
   walk_forward_results?: WalkForwardResult[]
+  monte_carlo_results?: MonteCarloResult
   indicator_snapshot?: { label: string; current_value: number | string; operator: string; threshold: number | null }[]
+}
+
+export interface MonteCarloResult {
+  mean_pnl_pct?: number
+  pnl_confidence_interval?: number[]
+  mean_max_drawdown?: number
+  robustness_score?: number
+  [key: string]: unknown
 }
 
 export interface BacktestTrade {

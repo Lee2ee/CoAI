@@ -15,13 +15,13 @@ async def optimize_strategy(
     user: User = Depends(get_current_user),
 ):
     """전략 파라미터 최적화"""
+    connector = None
     try:
         connector = ExchangeConnector(exchange_id=req.exchange, is_paper=True)
         symbol = req.strategy_config.get("symbol", "BTC/USDT")
         timeframe = req.strategy_config.get("timeframe", "1h")
 
         df = await connector.fetch_ohlcv(symbol, timeframe, limit=1000)
-        await connector.close()
 
         if req.start_date:
             df = df[df.index >= pd.Timestamp(req.start_date)]
@@ -65,6 +65,9 @@ async def optimize_strategy(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if connector is not None:
+            await connector.close()
 
 
 @router.post("/run", response_model=BacktestResponse)
@@ -72,13 +75,13 @@ async def run_backtest(
     req: BacktestRequest,
     user: User = Depends(get_current_user),
 ):
+    connector = None
     try:
         connector = ExchangeConnector(exchange_id=req.exchange, is_paper=True)
         symbol = req.strategy_config.get("symbol", "BTC/USDT")
         timeframe = req.strategy_config.get("timeframe", "1h")
 
         df = await connector.fetch_ohlcv(symbol, timeframe, limit=1500)
-        await connector.close()
 
         if req.start_date:
             df = df[df.index >= pd.Timestamp(req.start_date)]
@@ -156,3 +159,6 @@ async def run_backtest(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if connector is not None:
+            await connector.close()
